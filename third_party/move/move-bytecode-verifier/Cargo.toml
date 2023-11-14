@@ -13,7 +13,7 @@ edition = "2021"
 anyhow = "1.0.52"
 fail = "0.4.0"
 move-binary-format = { path = "../move-binary-format" }
-petgraph = "0.5.1"
+petgraph = "0.6.4"
 serde = "1.0.149"
 typed-arena = "2.0.2"
 
