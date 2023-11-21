@@ -25,18 +25,8 @@ use move_binary_format::{
 };
 use move_core_types::{identifier::IdentStr, vm_status::StatusCode};
 
-pub type FnCheckScriptSignature = fn(
-    &BinaryIndexedView,
-    /* is_entry */ bool,
-    SignatureIndex,
-    Option<SignatureIndex>,
-) -> PartialVMResult<()>;
-
 /// This function checks the extra requirements on the signature of the main function of a script.
-pub fn verify_script(
-    script: &CompiledScript,
-    check_signature: FnCheckScriptSignature,
-) -> VMResult<()> {
+pub fn verify_script(script: &CompiledScript, check_is_entry: bool) -> VMResult<()> {
     if script.version >= VERSION_5 {
         return Ok(());
     }
@@ -44,14 +34,11 @@ pub fn verify_script(
     let resolver = &BinaryIndexedView::Script(script);
     let parameters = script.parameters;
     let return_ = None;
-    verify_main_signature_impl(resolver, true, parameters, return_, check_signature)
+    verify_main_signature_impl(resolver, true, parameters, return_, check_is_entry)
         .map_err(|e| e.finish(Location::Script))
 }
 
-pub fn verify_module(
-    module: &CompiledModule,
-    check_signature: FnCheckScriptSignature,
-) -> VMResult<()> {
+pub fn verify_module(module: &CompiledModule, check_is_entry: bool) -> VMResult<()> {
     // important for not breaking old modules
     if module.version < VERSION_5 {
         return Ok(());
@@ -66,7 +53,7 @@ pub fn verify_module(
         verify_module_function_signature(
             module,
             FunctionDefinitionIndex(idx as TableIndex),
-            check_signature,
+            check_is_entry,
         )?
     }
     Ok(())
@@ -77,7 +64,7 @@ pub fn verify_module(
 pub fn verify_module_function_signature_by_name(
     module: &CompiledModule,
     name: &IdentStr,
-    check_signature: FnCheckScriptSignature,
+    check_is_entry: bool,
 ) -> VMResult<()> {
     let fdef_opt = module.function_defs().iter().enumerate().find(|(_, fdef)| {
         module.identifier_at(module.function_handle_at(fdef.function).name) == name
@@ -90,7 +77,7 @@ pub fn verify_module_function_signature_by_name(
     verify_module_function_signature(
         module,
         FunctionDefinitionIndex(idx as TableIndex),
-        check_signature,
+        check_is_entry,
     )
 }
 
@@ -99,7 +86,7 @@ pub fn verify_module_function_signature_by_name(
 fn verify_module_function_signature(
     module: &CompiledModule,
     idx: FunctionDefinitionIndex,
-    check_signature: FnCheckScriptSignature,
+    check_is_entry: bool,
 ) -> VMResult<()> {
     let fdef = module.function_def_at(idx);
 
@@ -112,7 +99,7 @@ fn verify_module_function_signature(
         fdef.is_entry,
         parameters,
         Some(return_),
-        check_signature,
+        check_is_entry,
     )
     .map_err(|e| {
         e.at_index(IndexKind::FunctionDefinition, idx.0)
@@ -125,22 +112,18 @@ fn verify_main_signature_impl(
     is_entry: bool,
     parameters_idx: SignatureIndex,
     return_idx: Option<SignatureIndex>,
-    check_signature: FnCheckScriptSignature,
+    check_is_entry: bool,
 ) -> PartialVMResult<()> {
     let deprecated_logic = resolver.version() < VERSION_5 && is_entry;
 
     if deprecated_logic {
         legacy_script_signature_checks(resolver, is_entry, parameters_idx, return_idx)?;
     }
-    check_signature(resolver, is_entry, parameters_idx, return_idx)
-}
-
-pub fn no_additional_script_signature_checks(
-    _resolver: &BinaryIndexedView,
-    _is_entry: bool,
-    _parameters: SignatureIndex,
-    _return_type: Option<SignatureIndex>,
-) -> PartialVMResult<()> {
+    if check_is_entry && !is_entry {
+        return Err(PartialVMError::new(
+            StatusCode::EXECUTE_ENTRY_FUNCTION_CALLED_ON_NON_ENTRY_FUNCTION,
+        ));
+    }
     Ok(())
 }
 

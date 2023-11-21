@@ -12,7 +12,7 @@
 use crate::{meter::Meter, VerifierConfig};
 use move_binary_format::{
     binary_views::{BinaryIndexedView, FunctionView},
-    control_flow_graph::{BlockId, ControlFlowGraph},
+    control_flow_graph::{BlockId, ControlFlowGraph, VMControlFlowGraph},
     errors::{PartialVMError, PartialVMResult},
     file_format::{Bytecode, CodeUnit, FunctionDefinitionIndex, Signature, StructFieldInformation},
 };
@@ -49,7 +49,7 @@ impl<'a> StackUsageVerifier<'a> {
         &self,
         config: &VerifierConfig,
         block_id: BlockId,
-        cfg: &dyn ControlFlowGraph,
+        cfg: &VMControlFlowGraph,
     ) -> PartialVMResult<()> {
         let code = &self.code.code;
         let mut stack_size_increment = 0;

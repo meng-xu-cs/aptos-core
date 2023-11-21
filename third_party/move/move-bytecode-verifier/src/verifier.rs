@@ -7,9 +7,8 @@ use crate::{
     ability_field_requirements, check_duplication::DuplicationChecker,
     code_unit_verifier::CodeUnitVerifier, constants, friends,
     instantiation_loops::InstantiationLoopChecker, instruction_consistency::InstructionConsistency,
-    limits::LimitsVerifier, script_signature,
-    script_signature::no_additional_script_signature_checks, signature::SignatureChecker,
-    signature_v2, struct_defs::RecursiveStructDefChecker,
+    limits::LimitsVerifier, script_signature, signature::SignatureChecker, signature_v2,
+    struct_defs::RecursiveStructDefChecker,
 };
 use move_binary_format::{
     check_bounds::BoundsChecker,
@@ -118,7 +117,7 @@ pub fn verify_module_with_config(config: &VerifierConfig, module: &CompiledModul
         // Add the failpoint injection to test the catch_unwind behavior.
         fail::fail_point!("verifier-failpoint-panic");
 
-        script_signature::verify_module(module, no_additional_script_signature_checks)
+        script_signature::verify_module(module, false)
     })
     .unwrap_or_else(|_| {
         Err(
@@ -160,7 +159,7 @@ pub fn verify_script_with_config(config: &VerifierConfig, script: &CompiledScrip
         InstructionConsistency::verify_script(script)?;
         constants::verify_script(script)?;
         CodeUnitVerifier::verify_script(config, script)?;
-        script_signature::verify_script(script, no_additional_script_signature_checks)
+        script_signature::verify_script(script, false)
     })
     .unwrap_or_else(|_| {
         Err(

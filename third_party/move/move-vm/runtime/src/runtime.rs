@@ -421,34 +421,12 @@ impl VMRuntime {
             parameters,
             return_,
         } = function_instantiation;
-
-        use move_binary_format::{binary_views::BinaryIndexedView, file_format::SignatureIndex};
-        fn check_is_entry(
-            _resolver: &BinaryIndexedView,
-            is_entry: bool,
-            _parameters_idx: SignatureIndex,
-            _return_idx: Option<SignatureIndex>,
-        ) -> PartialVMResult<()> {
-            if is_entry {
-                Ok(())
-            } else {
-                Err(PartialVMError::new(
-                    StatusCode::EXECUTE_ENTRY_FUNCTION_CALLED_ON_NON_ENTRY_FUNCTION,
-                ))
-            }
-        }
-        let additional_signature_checks = if bypass_declared_entry_check {
-            move_bytecode_verifier::no_additional_script_signature_checks
-        } else {
-            check_is_entry
-        };
-
         let LoadedFunction { module, function } = func;
 
         script_signature::verify_module_function_signature_by_name(
             module.module(),
             IdentStr::new(function.as_ref().name()).expect(""),
-            additional_signature_checks,
+            !bypass_declared_entry_check,
         )?;
 
         // execute the function

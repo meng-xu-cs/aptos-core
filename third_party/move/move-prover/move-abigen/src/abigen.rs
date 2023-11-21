@@ -135,9 +135,7 @@ impl<'env> Abigen<'env> {
                     // and check all arguments have a valid type tag
                     func.is_entry()
                         && script_signature::verify_module_function_signature_by_name(
-                            module,
-                            func_ident,
-                            script_signature::no_additional_script_signature_checks,
+                            module, func_ident, false,
                         )
                         .is_ok()
                         && func
