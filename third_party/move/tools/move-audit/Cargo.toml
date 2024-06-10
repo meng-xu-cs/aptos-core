@@ -1,0 +1,19 @@
+[package]
+name = "move-audit"
+version = "0.1.0"
+authors = ["Meng Xu <meng.xu.cs@uwaterloo.ca>"]
+description = "Automated auditing tools for Move projects"
+license = "Apache-2.0"
+publish = false
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["env", "unstable-styles"] }
+env_logger = { workspace = true }
+log = { workspace = true }
+petgraph = { workspace = true }
+walkdir = { workspace = true }
+
+move-core-types = { path = "../../move-core/types" }
+move-package = { path = "../move-package" }

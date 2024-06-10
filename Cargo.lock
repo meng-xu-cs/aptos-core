@@ -315,6 +315,7 @@ dependencies = [
  "itertools 0.13.0",
  "jemallocator",
  "maplit",
+ "move-audit",
  "move-binary-format",
  "move-bytecode-source-map",
  "move-cli",
@@ -10619,6 +10620,20 @@ dependencies = [
  "move-vm-types",
  "sha3 0.9.1",
  "smallvec",
+]
+
+[[package]]
+name = "move-audit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap 4.4.14",
+ "env_logger",
+ "log",
+ "move-core-types",
+ "move-package",
+ "petgraph 0.5.1",
+ "walkdir",
 ]
 
 [[package]]
