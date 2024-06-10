@@ -69,6 +69,7 @@ indoc = { workspace = true }
 itertools = { workspace = true }
 legacy-move-compiler = { workspace = true }
 maplit = { workspace = true }
+move-audit = { workspace = true }
 move-binary-format = { workspace = true }
 move-bytecode-source-map = { workspace = true }
 move-cli = { workspace = true }
