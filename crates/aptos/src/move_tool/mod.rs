@@ -99,6 +99,7 @@ const HELLO_BLOCKCHAIN_EXAMPLE: &str = include_str!(
 /// about this code.
 #[derive(Subcommand)]
 pub enum MoveTool {
+    Audit(AuditOptions),
     BuildPublishPayload(BuildPublishPayload),
     Clean(CleanPackage),
     ClearStagingArea(ClearStagingArea),
@@ -138,6 +139,7 @@ pub enum MoveTool {
 impl MoveTool {
     pub async fn execute(self) -> CliResult {
         match self {
+            MoveTool::Audit(tool) => tool.execute_serialized().await,
             MoveTool::BuildPublishPayload(tool) => tool.execute_serialized().await,
             MoveTool::Clean(tool) => tool.execute_serialized().await,
             MoveTool::ClearStagingArea(tool) => tool.execute_serialized().await,
@@ -171,6 +173,48 @@ impl MoveTool {
             MoveTool::Fmt(tool) => tool.execute_serialized().await,
             MoveTool::Lint(tool) => tool.execute_serialized().await,
         }
+    }
+}
+
+/// Audit a collection of Move packages
+#[derive(Parser)]
+pub struct AuditOptions {
+    /// Path to the project directory
+    path: PathBuf,
+
+    /// Choose a language version
+    #[clap(long, default_value = "2.0+")]
+    language: move_audit::LanguageSetting,
+
+    /// Skip automated update of dependencies
+    #[clap(long)]
+    skip_deps_update: bool,
+
+    /// Print additional diagnostics if available.
+    #[clap(short, long, action = clap::ArgAction::Count)]
+    verbose: u8,
+
+    /// Command
+    #[clap(subcommand)]
+    command: move_audit::AuditCommand,
+}
+
+#[async_trait]
+impl CliCommand<&'static str> for AuditOptions {
+    fn command_name(&self) -> &'static str {
+        "Audit"
+    }
+
+    async fn execute(self) -> CliTypedResult<&'static str> {
+        let Self {
+            path,
+            language,
+            skip_deps_update,
+            verbose,
+            command,
+        } = self;
+        move_audit::run_on(path, language, skip_deps_update, verbose, command)?;
+        Ok("succeeded")
     }
 }
 
