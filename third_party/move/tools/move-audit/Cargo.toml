@@ -10,10 +10,18 @@ edition = "2021"
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["env", "unstable-styles"] }
+command-group = "5.0.1"
 env_logger = { workspace = true }
+hex = { workspace = true }
+lazy_static = { workspace = true }
 log = { workspace = true }
 petgraph = { workspace = true }
+rand = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
 walkdir = { workspace = true }
 
+aptos-crypto = { path = "../../../../crates/aptos-crypto" }
 move-core-types = { path = "../../move-core/types" }
 move-package = { path = "../move-package" }
