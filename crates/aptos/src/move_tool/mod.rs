@@ -190,7 +190,7 @@ impl CliCommand<&'static str> for AuditOptions {
             verbose,
             command,
         } = self;
-        move_audit::run_on(&path, skip_deps_update, verbose, command)?;
+        move_audit::run_on(path, skip_deps_update, verbose, command)?;
         Ok("succeeded")
     }
 }

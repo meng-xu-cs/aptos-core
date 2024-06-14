@@ -15,6 +15,7 @@ use std::{
     fmt::{Display, Formatter},
     path::PathBuf,
 };
+use walkdir::WalkDir;
 
 /// Mark where the package being audited is stored
 #[derive(Eq, PartialEq)]
@@ -65,7 +66,7 @@ impl Display for PkgLocation {
 }
 
 /// Mark the version of the package being audited
-#[derive(Eq, PartialEq)]
+#[derive(Eq, PartialEq, Clone)]
 pub struct PkgVersion {
     major: u64,
     minor: u64,
@@ -93,11 +94,23 @@ pub enum PkgNamedAddr {
     Fixed(AccountAddress),
 }
 
+impl Display for PkgNamedAddr {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unset => write!(f, "_"),
+            Self::Devel(addr) => write!(f, "_{}_", addr),
+            Self::Fixed(addr) => write!(f, "{}", addr),
+        }
+    }
+}
+
 /// Manifest of the package being audited
+#[derive(Clone)]
 pub struct PkgManifest {
     pub name: String,
     pub path: PathBuf,
     pub version: PkgVersion,
+    pub deps: BTreeMap<String, PkgManifest>,
     pub named_addresses: BTreeMap<String, PkgNamedAddr>,
 }
 
@@ -244,6 +257,7 @@ fn analyze_package_manifest(
     }
 
     // analyze its dependencies
+    let mut dep_set = BTreeSet::new();
     for (dep_name, dep_info) in dependencies.into_iter().chain(dev_dependencies) {
         if dep_info.node_info.is_some() {
             bail!("on-chain dependency is not supported yet: {}", dep_name);
@@ -305,6 +319,13 @@ fn analyze_package_manifest(
                 }
 
                 // we have already analyzed this dependency
+                if !dep_set.insert(name) {
+                    bail!(
+                        "dependency {} is declared more than once in {}",
+                        dep_name,
+                        package.name
+                    );
+                }
                 continue;
             },
         }
@@ -320,7 +341,7 @@ fn analyze_package_manifest(
         }
 
         // recursively analyze the dependency
-        analyze_package_manifest(
+        let name = analyze_package_manifest(
             dep_location,
             Some(name),
             optional_version,
@@ -328,6 +349,13 @@ fn analyze_package_manifest(
             stack,
             skip_deps_update,
         )?;
+        if !dep_set.insert(name) {
+            bail!(
+                "dependency {} is declared more than once in {}",
+                dep_name,
+                package.name
+            );
+        }
     }
 
     // mark that we have analyzed this manifest
@@ -336,10 +364,19 @@ fn analyze_package_manifest(
         .unwrap_or_else(|| panic!("expect a package on top of stack"));
     assert_eq!(pkg_name, package.name.as_str());
 
+    // duplicate the manifests
+    let mut deps = BTreeMap::new();
+    for name in dep_set {
+        let manifest = analyzed_pkgs.get(&name).expect("manifest");
+        deps.insert(name, manifest.clone());
+    }
+
+    // construct manifest
     let exists = analyzed_pkgs.insert(pkg_name.clone(), PkgManifest {
         name: pkg_name.clone(),
         path: root,
         version: pkg_version,
+        deps,
         named_addresses,
     });
     if exists.is_some() {
@@ -349,12 +386,21 @@ fn analyze_package_manifest(
 }
 
 /// Resolve the dependency relation in the whole project
-pub fn resolve(paths: Vec<PathBuf>, skip_deps_update: bool) -> Result<Project> {
-    let mut analyzed_pkgs = BTreeMap::new();
+pub fn resolve(path: PathBuf, skip_deps_update: bool) -> Result<Project> {
+    // find move packages with the project directory
+    let mut pkgs = vec![];
+    for entry in WalkDir::new(&path) {
+        let entry = entry?;
+        let entry_path = entry.path();
+        if entry_path.file_name().expect("filename") == "Move.toml" {
+            pkgs.push(entry_path.parent().expect("parent").to_path_buf());
+        }
+    }
 
     // collect packages
+    let mut analyzed_pkgs = BTreeMap::new();
     let mut primary_pkgs = BTreeSet::new();
-    for path in paths {
+    for path in pkgs {
         let mut stack = vec![];
         let name = analyze_package_manifest(
             PkgLocation::Local { path },
@@ -425,6 +471,7 @@ pub fn resolve(paths: Vec<PathBuf>, skip_deps_update: bool) -> Result<Project> {
         .collect();
 
     Ok(Project {
+        root: path,
         pkgs,
         named_addresses,
     })
