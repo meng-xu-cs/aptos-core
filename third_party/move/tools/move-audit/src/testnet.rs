@@ -1,13 +1,9 @@
-use crate::{config::APTOS_BIN, deps::PkgNamedAddr, Project, Workspace};
+use crate::{common::Account, config::APTOS_BIN, Project, Workspace};
 use anyhow::{anyhow, bail, Result};
-use aptos_crypto::{
-    ed25519::{Ed25519PrivateKey, Ed25519PublicKey},
-    Uniform,
-};
+use aptos_crypto::ed25519::{Ed25519PrivateKey, Ed25519PublicKey};
 use command_group::{CommandGroup, GroupChild, Signal, UnixChildExt};
 use log::{debug, error, info};
 use move_core_types::account_address::AccountAddress;
-use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -151,41 +147,34 @@ pub fn launch_local_testnet(path: &Path, wks: &Workspace, restart: bool) -> Resu
 
 /// Populate workspace accounts
 pub fn init_local_testnet_profiles(project: &Project) -> Result<()> {
-    // create a profile per each unassigned named addresses
-    for (name, addr) in &project.named_addresses {
-        match addr {
-            PkgNamedAddr::Fixed(_) => continue,
-            PkgNamedAddr::Unset | PkgNamedAddr::Devel(_) => (),
-        }
+    for (name, account) in &project.named_accounts {
+        match account {
+            Account::Ref(_) => (),
+            Account::Owned(key) => {
+                let key_string = format!("0x{}", hex::encode(key.to_bytes()));
 
-        // prepare private key
-        let mut rng = OsRng;
-        let key = Ed25519PrivateKey::generate(&mut rng);
-        let key_string = format!("0x{}", hex::encode(key.to_bytes()));
-        debug!("initializing with private key: {}", key_string);
-
-        // register the profile
-        let status = Command::new(APTOS_BIN.as_path())
-            .args([
-                "init",
-                "--network",
-                "local",
-                "--profile",
-                name.as_str(),
-                "--private-key",
-                key_string.as_str(),
-                "--skip-faucet",
-                "--assume-yes",
-            ])
-            .current_dir(&project.root)
-            .spawn()?
-            .wait()?;
-        if !status.success() {
-            bail!("failed to initialize profile {}", name);
+                // register the profile
+                let status = Command::new(APTOS_BIN.as_path())
+                    .args([
+                        "init",
+                        "--network",
+                        "local",
+                        "--profile",
+                        name.as_str(),
+                        "--private-key",
+                        key_string.as_str(),
+                        "--skip-faucet",
+                        "--assume-yes",
+                    ])
+                    .current_dir(&project.root)
+                    .spawn()?
+                    .wait()?;
+                if !status.success() {
+                    bail!("failed to initialize profile {}", name);
+                }
+            },
         }
     }
-
-    // done
     Ok(())
 }
 

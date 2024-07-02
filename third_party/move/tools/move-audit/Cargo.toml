@@ -23,5 +23,6 @@ serde_yaml = { workspace = true }
 walkdir = { workspace = true }
 
 aptos-crypto = { path = "../../../../crates/aptos-crypto" }
+aptos-types = { path = "../../../../types" }
 move-core-types = { path = "../../move-core/types" }
 move-package = { path = "../move-package" }

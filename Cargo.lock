@@ -10646,6 +10646,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "aptos-crypto",
+ "aptos-types",
  "clap 4.5.14",
  "command-group",
  "env_logger 0.10.2",

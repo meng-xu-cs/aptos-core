@@ -1,5 +1,6 @@
-use crate::Project;
+use crate::{common::Account, Project};
 use anyhow::{bail, Result};
+use aptos_crypto::{ed25519::Ed25519PrivateKey, PrivateKey, Uniform};
 use log::debug;
 use move_core_types::account_address::AccountAddress;
 use move_package::{
@@ -10,6 +11,7 @@ use move_package::{
         parsed_manifest::{SourceManifest, Version},
     },
 };
+use rand::rngs::OsRng;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::{Display, Formatter},
@@ -420,12 +422,12 @@ pub fn resolve(path: PathBuf, skip_deps_update: bool) -> Result<Project> {
     );
 
     // consolidate named addresses
-    let mut named_addresses = BTreeMap::new();
+    let mut consolidated = BTreeMap::new();
     for pkg in analyzed_pkgs.values() {
         for (addr_name, addr_val) in &pkg.named_addresses {
-            match named_addresses.get_mut(addr_name) {
+            match consolidated.get_mut(addr_name) {
                 None => {
-                    named_addresses.insert(addr_name.clone(), *addr_val);
+                    consolidated.insert(addr_name.clone(), *addr_val);
                 },
                 Some(existing) => match (*existing, *addr_val) {
                     (PkgNamedAddr::Unset, PkgNamedAddr::Unset) => (),
@@ -458,8 +460,20 @@ pub fn resolve(path: PathBuf, skip_deps_update: bool) -> Result<Project> {
     }
     debug!(
         "{} named addresses found and consolidated",
-        named_addresses.len()
+        consolidated.len()
     );
+
+    // unpack the consolidation and assign random addresses for unset ones
+    let mut named_accounts = BTreeMap::new();
+    for (key, val) in consolidated {
+        let account = match val {
+            PkgNamedAddr::Fixed(addr) => Account::Ref(addr),
+            PkgNamedAddr::Devel(_) | PkgNamedAddr::Unset => {
+                Account::Owned(Ed25519PrivateKey::generate(&mut OsRng))
+            },
+        };
+        named_accounts.insert(key, account);
+    }
 
     // done
     let pkgs = analyzed_pkgs
@@ -473,6 +487,6 @@ pub fn resolve(path: PathBuf, skip_deps_update: bool) -> Result<Project> {
     Ok(Project {
         root: path,
         pkgs,
-        named_addresses,
+        named_accounts,
     })
 }

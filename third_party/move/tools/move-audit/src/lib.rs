@@ -7,13 +7,12 @@ mod testnet;
 use crate::{
     common::{Project, Workspace},
     deps::PkgManifest,
-    testnet::ProfileConfig,
 };
 use anyhow::{anyhow, bail, Result};
 use clap::{Parser, Subcommand};
 use log::{debug, info, LevelFilter};
 use regex::Regex;
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 /// Commands for auditing
 #[derive(Subcommand)]
@@ -28,8 +27,8 @@ pub enum AuditCommand {
     /// List collected packages in the project
     List,
 
-    /// Run unit tests in the packages
-    UnitTest {
+    /// Run unit tests in the packages (locally, without network)
+    Test {
         /// Filter on package level
         #[clap(flatten)]
         pkg_filter: FilterPackage,
@@ -37,6 +36,13 @@ pub enum AuditCommand {
         /// Compilation only (skip unit tests)
         #[clap(long)]
         compile_only: bool,
+    },
+
+    /// Run end-to-end scripts in the simulated network
+    Exec {
+        /// Path to a concrete script file
+        #[clap(short, long)]
+        script: Option<PathBuf>,
     },
 }
 
@@ -57,7 +63,7 @@ pub struct FilterPackage {
 }
 
 impl FilterPackage {
-    fn apply<'a>(&self, project: &'a Project) -> Result<Vec<&'a PkgManifest>> {
+    fn apply(&self, pkgs: BTreeMap<String, (PkgManifest, bool)>) -> Result<Vec<PkgManifest>> {
         let include_regex = match self.include_pkg.as_ref() {
             None => None,
             Some(patterns) => Some(
@@ -79,14 +85,14 @@ impl FilterPackage {
 
         // filtering logic: include first then exclude
         let mut filtered = vec![];
-        for (name, (manifest, is_primary)) in project.pkgs.iter() {
+        for (name, (manifest, is_primary)) in pkgs {
             if !is_primary && !self.include_deps {
                 continue;
             }
             match include_regex.as_ref() {
                 None => (),
                 Some(regexes) => {
-                    if regexes.iter().all(|r| !r.is_match(name)) {
+                    if regexes.iter().all(|r| !r.is_match(name.as_str())) {
                         continue;
                     }
                 },
@@ -94,7 +100,7 @@ impl FilterPackage {
             match exclude_regex.as_ref() {
                 None => (),
                 Some(regexes) => {
-                    if regexes.iter().any(|r| r.is_match(name)) {
+                    if regexes.iter().any(|r| r.is_match(name.as_str())) {
                         continue;
                     }
                 },
@@ -134,22 +140,30 @@ fn cmd_list(project: Project) {
     }
 }
 
-fn cmd_unit_test(project: Project, filter: FilterPackage, compile_only: bool) -> Result<()> {
-    // collect named addresses
-    let wks = Workspace::load(&project)?;
-    if !wks.config.is_file() {
-        bail!("unable to find config.yaml in workspace, run init command to initialize first");
-    }
-    let config = ProfileConfig::load(&wks)?;
-
-    // run over each package
-    for pkg in filter.apply(&project)? {
+fn cmd_test(project: Project, filter: FilterPackage, compile_only: bool) -> Result<()> {
+    let Project {
+        root: _,
+        pkgs,
+        named_accounts,
+    } = project;
+    for pkg in filter.apply(pkgs)? {
         info!("running unit tests for package {}", pkg.name);
-        package::exec_unit_test(pkg, &config, compile_only)?;
+        package::exec_unit_test(&pkg, &named_accounts, compile_only)?;
     }
 
     // done
     Ok(())
+}
+
+fn cmd_exec(project: Project) {
+    for (name, (manifest, is_primary)) in project.pkgs {
+        println!(
+            "{} [{}] :{}",
+            name,
+            manifest.version,
+            if is_primary { "primary" } else { "dependency" }
+        )
+    }
 }
 
 /// Entrypoint on multi-package auditing
@@ -184,11 +198,14 @@ pub fn run_on(
         AuditCommand::List => {
             cmd_list(project);
         },
-        AuditCommand::UnitTest {
+        AuditCommand::Test {
             pkg_filter,
             compile_only,
         } => {
-            cmd_unit_test(project, pkg_filter, compile_only)?;
+            cmd_test(project, pkg_filter, compile_only)?;
+        },
+        AuditCommand::Exec { .. } => {
+            cmd_exec(project);
         },
     }
 
