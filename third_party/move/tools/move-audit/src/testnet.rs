@@ -1,10 +1,13 @@
 use crate::{common::Account, config::APTOS_BIN, deps::PkgManifest, package};
 use anyhow::{anyhow, bail, Result};
+use aptos_crypto::{ed25519::Ed25519PrivateKey, Uniform};
 use command_group::{CommandGroup, GroupChild, Signal, UnixChildExt};
 use log::{debug, error, info};
 use move_compiler::compiled_unit::CompiledUnit;
+use rand::rngs::OsRng;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
     io::{BufRead, BufReader},
     path::Path,
     process::{Command, Stdio},
@@ -143,52 +146,59 @@ pub fn init_local_testnet(wks: &Path) -> Result<Subcommand> {
     })
 }
 
+fn populate_account(wks: &Path, name: &str, key: &Ed25519PrivateKey) -> Result<()> {
+    let key_string = format!("0x{}", hex::encode(key.to_bytes()));
+
+    // register the profile
+    let status = Command::new(APTOS_BIN.as_path())
+        .args([
+            "init",
+            "--network",
+            "local",
+            "--profile",
+            name,
+            "--private-key",
+            key_string.as_str(),
+            "--skip-faucet",
+            "--assume-yes",
+        ])
+        .current_dir(wks)
+        .spawn()?
+        .wait()?;
+    if !status.success() {
+        bail!("failed to initialize account {}", name);
+    }
+
+    // fund the account
+    let status = Command::new(APTOS_BIN.as_path())
+        .args([
+            "account",
+            "fund-with-faucet",
+            "--profile",
+            name,
+            "--account",
+            name,
+            "--amount",
+            &ACCOUNT_INITIAL_FUND.to_string(),
+        ])
+        .current_dir(wks)
+        .spawn()?
+        .wait()?;
+    if !status.success() {
+        bail!("failed to fund account {}", name);
+    }
+
+    // done
+    Ok(())
+}
+
 /// Populate workspace accounts for project profiles
 pub fn init_project_accounts(wks: &Path, named_accounts: &BTreeMap<String, Account>) -> Result<()> {
     for (name, account) in named_accounts {
         match account {
             Account::Ref(_) => (),
             Account::Owned(key) => {
-                let key_string = format!("0x{}", hex::encode(key.to_bytes()));
-
-                // register the profile
-                let status = Command::new(APTOS_BIN.as_path())
-                    .args([
-                        "init",
-                        "--network",
-                        "local",
-                        "--profile",
-                        name.as_str(),
-                        "--private-key",
-                        key_string.as_str(),
-                        "--skip-faucet",
-                        "--assume-yes",
-                    ])
-                    .current_dir(wks)
-                    .spawn()?
-                    .wait()?;
-                if !status.success() {
-                    bail!("failed to initialize account {}", name);
-                }
-
-                // fund the account
-                let status = Command::new(APTOS_BIN.as_path())
-                    .args([
-                        "account",
-                        "fund-with-faucet",
-                        "--profile",
-                        name.as_str(),
-                        "--account",
-                        name.as_str(),
-                        "--amount",
-                        &ACCOUNT_INITIAL_FUND.to_string(),
-                    ])
-                    .current_dir(wks)
-                    .spawn()?
-                    .wait()?;
-                if !status.success() {
-                    bail!("failed to fund account {}", name);
-                }
+                populate_account(wks, name, key)?;
             },
         }
     }
@@ -302,5 +312,112 @@ pub fn publish_project_packages(
             bail!("failed to publish package {}", manifest.name);
         }
     }
+    Ok(())
+}
+
+fn extract_script_config(
+    path: &Path,
+    named_accounts: &BTreeMap<String, Account>,
+) -> Result<(BTreeMap<String, Ed25519PrivateKey>, String)> {
+    let mut new_keys = BTreeMap::new();
+    let mut signer = None;
+
+    let content = fs::read_to_string(path)?;
+    for line in content.lines() {
+        let config = match line.strip_prefix("//:") {
+            None => {
+                // requires consecutive config lines
+                break;
+            },
+            Some(rest) => rest,
+        };
+
+        let tokens: Vec<_> = config.split(' ').collect();
+        if tokens.len() != 2 {
+            bail!(
+                "invalid config line '{}' in script {}",
+                line,
+                path.to_string_lossy()
+            );
+        }
+
+        let val = tokens.last().unwrap().trim();
+        match *tokens.first().unwrap() {
+            "a" => {
+                if named_accounts.contains_key(val) {
+                    bail!("cannot re-declare a project account: {}", val);
+                }
+                if new_keys.contains_key(val) {
+                    bail!("the same account is declared more than once: {}", val);
+                }
+                new_keys.insert(val.to_string(), Ed25519PrivateKey::generate(&mut OsRng));
+            },
+            "s" => {
+                if signer.is_some() {
+                    bail!("signer is declared more than once");
+                }
+                if !named_accounts.contains_key(val) {
+                    if new_keys.contains_key(val) {
+                        bail!("the same account is declared more than once: {}", val);
+                    }
+                    new_keys.insert(val.to_string(), Ed25519PrivateKey::generate(&mut OsRng));
+                }
+                signer = Some(val.to_string());
+            },
+            _ => bail!(
+                "invalid config line '{}' in script {}",
+                line,
+                path.to_string_lossy()
+            ),
+        };
+    }
+
+    // ensure that we have a signer
+    let name = match signer {
+        None => bail!("no signer is declared"),
+        Some(s) => s,
+    };
+
+    Ok((new_keys, name))
+}
+
+/// Execute a move script
+pub fn execute_script(
+    wks: &Path,
+    index: usize,
+    script: &Path,
+    named_accounts: &BTreeMap<String, Account>,
+) -> Result<()> {
+    // extract configs
+    let (new_keys, signer) = extract_script_config(script, named_accounts)?;
+
+    let mut new_accounts = BTreeMap::new();
+    for (name, key) in new_keys {
+        populate_account(wks, &name, &key)?;
+        new_accounts.insert(name, Account::Owned(key));
+    }
+
+    // compile the script
+    let compiled = wks.join(format!("{}.mv", index));
+    let named_address_pairs: Vec<_> = named_accounts
+        .iter()
+        .chain(new_accounts.iter())
+        .map(|(k, v)| format!("{}={}", k, v.address()))
+        .collect();
+
+    let status = Command::new(APTOS_BIN.as_path())
+        .args(["move", "compile-script"])
+        .arg("--skip-fetch-latest-git-deps")
+        .args(["--named-addresses", &named_address_pairs.join(",")])
+        .arg("--output-file")
+        .arg(&compiled)
+        .arg(script)
+        .current_dir(wks)
+        .spawn()?
+        .wait()?;
+    if !status.success() {
+        bail!("failed to compile script {}", script.to_string_lossy());
+    }
+
     Ok(())
 }

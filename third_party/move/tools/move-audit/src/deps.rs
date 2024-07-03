@@ -16,9 +16,11 @@ use rand::rngs::OsRng;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::{Display, Formatter},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 use walkdir::WalkDir;
+
+const DEFAULT_SCRIPTS_DIRECTORY: &str = "scripts";
 
 /// Mark where the package being audited is stored
 #[derive(Eq, PartialEq)]
@@ -389,14 +391,15 @@ fn analyze_package_manifest(
 }
 
 /// Resolve the dependency relation in the whole project
-pub fn resolve(path: PathBuf, skip_deps_update: bool) -> Result<Project> {
+pub fn resolve(path: &Path, skip_deps_update: bool) -> Result<Project> {
     // find move packages with the project directory
     let mut pkgs = vec![];
-    for entry in WalkDir::new(&path) {
+    for entry in WalkDir::new(path) {
         let entry = entry?;
-        let entry_path = entry.path();
+        let mut entry_path = entry.into_path();
         if entry_path.file_name().expect("filename") == "Move.toml" {
-            pkgs.push(entry_path.parent().expect("parent").to_path_buf());
+            assert!(entry_path.pop());
+            pkgs.push(entry_path);
         }
     }
 
@@ -514,9 +517,23 @@ pub fn resolve(path: PathBuf, skip_deps_update: bool) -> Result<Project> {
         },
     }
 
+    // find move scripts with the project directory
+    let mut scripts = vec![];
+    for entry in WalkDir::new(path.join(DEFAULT_SCRIPTS_DIRECTORY)) {
+        let entry = entry?;
+        let entry_path = entry.into_path();
+        if entry_path.file_name().expect("filename") == "Move.toml" {
+            bail!("script directory should not contain Move packages");
+        }
+        if entry_path.extension().map_or(false, |e| e == "move") {
+            scripts.push(entry_path);
+        }
+    }
+
     // done
     Ok(Project {
         pkgs,
+        scripts,
         named_accounts,
     })
 }

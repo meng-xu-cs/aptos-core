@@ -116,6 +116,7 @@ fn cmd_list(project: Project) {
 fn cmd_test(project: Project, filter: FilterPackage, compile_only: bool) -> Result<()> {
     let Project {
         pkgs,
+        scripts: _,
         named_accounts,
     } = project;
     for pkg in filter.apply(pkgs)? {
@@ -127,25 +128,35 @@ fn cmd_test(project: Project, filter: FilterPackage, compile_only: bool) -> Resu
     Ok(())
 }
 
-fn cmd_exec(project: Project) -> Result<()> {
-    let tmp = tempfile::tempdir()?;
-    let wks = tmp.path();
-    let cmd = testnet::init_local_testnet(wks)?;
-
+fn cmd_exec(project: Project, script: Option<PathBuf>) -> Result<()> {
+    // initialize the project
     let Project {
         pkgs,
+        scripts,
         named_accounts,
     } = project;
+    let scripts = script.map_or(scripts, |p| vec![p]);
 
-    let result = testnet::init_project_accounts(wks, &named_accounts)
-        .and_then(|_| testnet::publish_project_packages(wks, &pkgs, &named_accounts));
+    // a fresh environment for every script
+    for (index, script) in scripts.iter().enumerate() {
+        let tmp = tempfile::tempdir()?;
+        let wks = tmp.path();
+        let cmd = testnet::init_local_testnet(wks)?;
 
-    // clean-up either on success or on failure
-    cmd.interrupt()?;
-    drop(tmp);
+        let result = testnet::init_project_accounts(wks, &named_accounts)
+            .and_then(|_| testnet::publish_project_packages(wks, &pkgs, &named_accounts))
+            .and_then(|_| testnet::execute_script(wks, index, script, &named_accounts));
 
-    // return the execution result
-    result
+        // clean-up either on success or on failure
+        cmd.interrupt()?;
+        drop(tmp);
+
+        // short circuit if any script fails
+        result?;
+    }
+
+    // done
+    Ok(())
 }
 
 /// Entrypoint on multi-package auditing
@@ -170,7 +181,7 @@ pub fn run_on(
     debug!("auditing project at path: {}", path.to_string_lossy());
 
     // resolve the project
-    let project = deps::resolve(path, skip_deps_update)?;
+    let project = deps::resolve(&path, skip_deps_update)?;
 
     // execute the command
     match command {
@@ -183,8 +194,8 @@ pub fn run_on(
         } => {
             cmd_test(project, pkg_filter, compile_only)?;
         },
-        AuditCommand::Exec { .. } => {
-            cmd_exec(project)?;
+        AuditCommand::Exec { script } => {
+            cmd_exec(project, script)?;
         },
     }
 
