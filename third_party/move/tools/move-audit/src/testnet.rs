@@ -3,6 +3,7 @@ use anyhow::{anyhow, bail, Result};
 use command_group::{CommandGroup, GroupChild, Signal, UnixChildExt};
 use log::{debug, error, info};
 use std::{
+    collections::BTreeMap,
     io::{BufRead, BufReader},
     path::Path,
     process::{Command, Stdio},
@@ -142,8 +143,8 @@ pub fn init_local_testnet(wks: &Path) -> Result<Subcommand> {
 }
 
 /// Populate workspace accounts for project profiles
-pub fn init_project_accounts(project: &Project) -> Result<()> {
-    for (name, account) in &project.named_accounts {
+pub fn init_project_accounts(wks: &Path, named_accounts: &BTreeMap<String, Account>) -> Result<()> {
+    for (name, account) in named_accounts {
         match account {
             Account::Ref(_) => (),
             Account::Owned(key) => {
@@ -162,7 +163,7 @@ pub fn init_project_accounts(project: &Project) -> Result<()> {
                         "--skip-faucet",
                         "--assume-yes",
                     ])
-                    .current_dir(&project.root)
+                    .current_dir(wks)
                     .spawn()?
                     .wait()?;
                 if !status.success() {
@@ -181,7 +182,7 @@ pub fn init_project_accounts(project: &Project) -> Result<()> {
                         "--amount",
                         &ACCOUNT_INITIAL_FUND.to_string(),
                     ])
-                    .current_dir(&project.root)
+                    .current_dir(wks)
                     .spawn()?
                     .wait()?;
                 if !status.success() {

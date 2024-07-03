@@ -516,7 +516,6 @@ pub fn resolve(path: PathBuf, skip_deps_update: bool) -> Result<Project> {
 
     // done
     Ok(Project {
-        root: path,
         pkgs,
         named_accounts,
     })

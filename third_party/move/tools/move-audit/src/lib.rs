@@ -115,7 +115,6 @@ fn cmd_list(project: Project) {
 
 fn cmd_test(project: Project, filter: FilterPackage, compile_only: bool) -> Result<()> {
     let Project {
-        root: _,
         pkgs,
         named_accounts,
     } = project;
@@ -129,15 +128,20 @@ fn cmd_test(project: Project, filter: FilterPackage, compile_only: bool) -> Resu
 }
 
 fn cmd_exec(project: Project) -> Result<()> {
-    let wks = tempfile::tempdir()?;
-    let cmd = testnet::init_local_testnet(wks.path())?;
+    let tmp = tempfile::tempdir()?;
+    let wks = tmp.path();
+    let cmd = testnet::init_local_testnet(wks)?;
 
-    let result = testnet::init_project_accounts(&project)
-        .and_then(|_| testnet::init_project_accounts(&project));
+    let Project {
+        pkgs: _,
+        named_accounts,
+    } = project;
+
+    let result = testnet::init_project_accounts(wks, &named_accounts);
 
     // clean-up either on success or on failure
     cmd.interrupt()?;
-    drop(wks);
+    drop(tmp);
 
     // return the execution result
     result
