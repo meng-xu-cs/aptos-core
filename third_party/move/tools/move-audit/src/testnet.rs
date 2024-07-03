@@ -177,27 +177,3 @@ pub fn init_local_testnet_profiles(project: &Project) -> Result<()> {
     }
     Ok(())
 }
-
-/// An individual profile
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Profile {
-    pub private_key: Ed25519PrivateKey,
-    pub public_key: Ed25519PublicKey,
-    pub account: AccountAddress,
-    pub rest_url: String,
-    pub faucet_url: String,
-}
-
-/// Config saved to `.aptos/config.yaml`
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ProfileConfig {
-    pub profiles: BTreeMap<String, Profile>,
-}
-
-impl ProfileConfig {
-    pub fn load(wks: &Workspace) -> Result<Self> {
-        let content = fs::read_to_string(&wks.config)?;
-        let config = serde_yaml::from_str(&content)?;
-        Ok(config)
-    }
-}

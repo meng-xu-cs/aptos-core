@@ -61,6 +61,7 @@ pub fn exec_unit_test(
         .args([
             "move",
             if compile_only { "compile" } else { "test" },
+            "--skip-fetch-latest-git-deps",
             "--dev",
             "--named-addresses",
         ])
