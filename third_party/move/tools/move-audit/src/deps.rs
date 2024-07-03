@@ -11,6 +11,7 @@ use move_package::{
         parsed_manifest::{SourceManifest, Version},
     },
 };
+use petgraph::{algo::toposort, graph::DiGraph};
 use rand::rngs::OsRng;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -475,15 +476,45 @@ pub fn resolve(path: PathBuf, skip_deps_update: bool) -> Result<Project> {
         named_accounts.insert(key, account);
     }
 
-    // done
-    let pkgs = analyzed_pkgs
-        .into_iter()
-        .map(|(k, v)| {
-            let is_primary = primary_pkgs.contains(&k);
-            (k, (v, is_primary))
-        })
-        .collect();
+    // build a dependency graph out of these packages
+    let mut graph = DiGraph::new();
+    let mut index_mapping = BTreeMap::new();
+    for name in analyzed_pkgs.keys() {
+        let index = graph.add_node(name.clone());
+        index_mapping.insert(name.clone(), index);
+    }
+    for (name, pkg) in &analyzed_pkgs {
+        let dst = *index_mapping.get(name).expect("dst node");
+        for dep in pkg.deps.keys() {
+            let src = *index_mapping.get(dep).expect("src node");
+            graph.add_edge(src, dst, ());
+        }
+    }
 
+    // topologically sort the dependency graph
+    let mut pkgs = vec![];
+    match toposort(&graph, None) {
+        Ok(nodes) => {
+            for node in nodes {
+                let key = graph.node_weight(node).expect("node");
+                let pkg = analyzed_pkgs
+                    .remove(key)
+                    .unwrap_or_else(|| panic!("expect package with name {}", key));
+                let is_primary = primary_pkgs.contains(key);
+                pkgs.push((pkg, is_primary));
+            }
+        },
+        Err(cycle) => {
+            bail!(
+                "unexpected cyclic dependency in packages: {}",
+                graph
+                    .node_weight(cycle.node_id())
+                    .map_or("<unknown>", |e| e.as_str())
+            );
+        },
+    }
+
+    // done
     Ok(Project {
         root: path,
         pkgs,

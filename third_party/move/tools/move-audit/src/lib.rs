@@ -12,7 +12,7 @@ use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use log::{debug, info, LevelFilter};
 use regex::Regex;
-use std::{collections::BTreeMap, path::PathBuf};
+use std::path::PathBuf;
 
 /// Commands for auditing
 #[derive(Subcommand)]
@@ -63,7 +63,7 @@ pub struct FilterPackage {
 }
 
 impl FilterPackage {
-    fn apply(&self, pkgs: BTreeMap<String, (PkgManifest, bool)>) -> Result<Vec<PkgManifest>> {
+    fn apply(&self, pkgs: Vec<(PkgManifest, bool)>) -> Result<Vec<PkgManifest>> {
         let include_regex = match self.include_pkg.as_ref() {
             None => None,
             Some(patterns) => Some(
@@ -85,14 +85,14 @@ impl FilterPackage {
 
         // filtering logic: include first then exclude
         let mut filtered = vec![];
-        for (name, (manifest, is_primary)) in pkgs {
+        for (manifest, is_primary) in pkgs {
             if !is_primary && !self.include_deps {
                 continue;
             }
             match include_regex.as_ref() {
                 None => (),
                 Some(regexes) => {
-                    if regexes.iter().all(|r| !r.is_match(name.as_str())) {
+                    if regexes.iter().all(|r| !r.is_match(&manifest.name)) {
                         continue;
                     }
                 },
@@ -100,7 +100,7 @@ impl FilterPackage {
             match exclude_regex.as_ref() {
                 None => (),
                 Some(regexes) => {
-                    if regexes.iter().any(|r| r.is_match(name.as_str())) {
+                    if regexes.iter().any(|r| r.is_match(&manifest.name)) {
                         continue;
                     }
                 },
@@ -130,10 +130,10 @@ fn cmd_init(project: Project, force: bool) -> Result<()> {
 }
 
 fn cmd_list(project: Project) {
-    for (name, (manifest, is_primary)) in project.pkgs {
+    for (manifest, is_primary) in project.pkgs {
         println!(
             "{} [{}] :{}",
-            name,
+            manifest.name,
             manifest.version,
             if is_primary { "primary" } else { "dependency" }
         )
@@ -156,10 +156,10 @@ fn cmd_test(project: Project, filter: FilterPackage, compile_only: bool) -> Resu
 }
 
 fn cmd_exec(project: Project) {
-    for (name, (manifest, is_primary)) in project.pkgs {
+    for (manifest, is_primary) in project.pkgs {
         println!(
             "{} [{}] :{}",
-            name,
+            manifest.name,
             manifest.version,
             if is_primary { "primary" } else { "dependency" }
         )

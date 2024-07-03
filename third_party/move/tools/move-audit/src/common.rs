@@ -25,7 +25,7 @@ impl Account {
 /// A Move audit project composed by a list of packages to audit
 pub struct Project {
     pub root: PathBuf,
-    pub pkgs: BTreeMap<String, (PkgManifest, bool)>,
+    pub pkgs: Vec<(PkgManifest, bool)>,
     pub named_accounts: BTreeMap<String, Account>,
 }
 
