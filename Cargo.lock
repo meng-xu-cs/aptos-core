@@ -10653,6 +10653,7 @@ dependencies = [
  "hex",
  "lazy_static",
  "log",
+ "move-compiler",
  "move-core-types",
  "move-package",
  "petgraph 0.5.1",

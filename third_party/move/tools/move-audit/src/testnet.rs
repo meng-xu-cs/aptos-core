@@ -1,9 +1,10 @@
-use crate::{common::Account, config::APTOS_BIN, deps::PkgManifest, package, Project};
+use crate::{common::Account, config::APTOS_BIN, deps::PkgManifest, package};
 use anyhow::{anyhow, bail, Result};
 use command_group::{CommandGroup, GroupChild, Signal, UnixChildExt};
 use log::{debug, error, info};
+use move_compiler::compiled_unit::CompiledUnit;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::{BufRead, BufReader},
     path::Path,
     process::{Command, Stdio},
@@ -207,7 +208,99 @@ pub fn publish_project_packages(
         }
 
         // compile the package first
-        let pkg = package::build(manifest, false)?;
+        let pkg = package::build(manifest, named_accounts, false)?;
+
+        // derive sender account
+        let mut accounts = BTreeSet::new();
+        for unit in &pkg.root_compiled_units {
+            match &unit.unit {
+                CompiledUnit::Module(module) => {
+                    accounts.insert(module.address);
+                },
+                CompiledUnit::Script(_) => {
+                    bail!(
+                        "unexpected script in package to publish: {}",
+                        unit.source_path.to_string_lossy()
+                    );
+                },
+            }
+        }
+
+        if accounts.is_empty() {
+            // no modules to publish, skip this package
+            continue;
+        }
+        let mut iter = accounts.into_iter();
+        let sender = match iter.next() {
+            None => {
+                // no modules to publish, skip this package
+                continue;
+            },
+            Some(addr) => {
+                if iter.next().is_some() {
+                    bail!("more than one addresses identified to publish all modules");
+                }
+                addr.into_inner()
+            },
+        };
+
+        // reverse lookup the name
+        let mut filtered = pkg
+            .compiled_package_info
+            .address_alias_instantiation
+            .iter()
+            .filter_map(|(name, addr)| {
+                if addr == &sender {
+                    Some(name.as_str())
+                } else {
+                    None
+                }
+            });
+        let account = match filtered.next() {
+            None => {
+                bail!("unable to find the owner of address 0x{}", sender);
+            },
+            Some(name) => {
+                if filtered.next().is_some() {
+                    bail!("more than one owners identified to publish all modules");
+                }
+                name
+            },
+        };
+
+        // build named addresses for cli invocation
+        let named_address_pairs: Vec<_> = pkg
+            .compiled_package_info
+            .address_alias_instantiation
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
+
+        // publish the package
+        let status = Command::new(APTOS_BIN.as_path())
+            .args([
+                "move",
+                "publish",
+                "--included-artifacts",
+                "none",
+                "--profile",
+                account,
+                "--sender-account",
+                account,
+                "--skip-fetch-latest-git-deps",
+                "--override-size-check",
+            ])
+            .arg("--package-dir")
+            .arg(&manifest.path)
+            .arg("--named-addresses")
+            .arg(named_address_pairs.join(","))
+            .arg("--assume-yes")
+            .current_dir(wks)
+            .spawn()?
+            .wait()?;
+        if !status.success() {
+            bail!("failed to publish package {}", manifest.name);
+        }
     }
     Ok(())
 }

@@ -23,5 +23,6 @@ walkdir = { workspace = true }
 
 aptos-crypto = { path = "../../../../crates/aptos-crypto" }
 aptos-types = { path = "../../../../types" }
+move-compiler = { path = "../../move-compiler" }
 move-core-types = { path = "../../move-core/types" }
 move-package = { path = "../move-package" }
