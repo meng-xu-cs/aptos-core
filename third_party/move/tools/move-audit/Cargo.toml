@@ -22,6 +22,7 @@ tempfile = { workspace = true }
 walkdir = { workspace = true }
 
 aptos-crypto = { path = "../../../../crates/aptos-crypto" }
+aptos-framework = { path = "../../../../aptos-move/framework" }
 aptos-types = { path = "../../../../types" }
 move-compiler = { path = "../../move-compiler" }
 move-core-types = { path = "../../move-core/types" }

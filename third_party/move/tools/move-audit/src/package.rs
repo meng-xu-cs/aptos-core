@@ -4,8 +4,9 @@ use crate::{
     deps::{PkgManifest, PkgNamedAddr},
 };
 use anyhow::{bail, Result};
+use aptos_framework::extended_checks;
 use move_core_types::account_address::AccountAddress;
-use move_package::{compilation::compiled_package::CompiledPackage, BuildConfig};
+use move_package::{compilation::compiled_package::CompiledPackage, BuildConfig, CompilerConfig};
 use std::{collections::BTreeMap, io, process::Command};
 
 fn collect_named_addresses(
@@ -58,6 +59,10 @@ pub fn build(
         test_mode: for_test,
         skip_fetch_latest_git_deps: true,
         additional_named_addresses: named_addresses,
+        compiler_config: CompilerConfig {
+            known_attributes: extended_checks::get_all_attribute_names().clone(),
+            ..Default::default()
+        },
         ..Default::default()
     };
     config.compile_package(&pkg.path, &mut io::stdout())
