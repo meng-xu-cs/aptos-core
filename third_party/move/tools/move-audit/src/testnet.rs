@@ -1,13 +1,8 @@
-use crate::{common::Account, config::APTOS_BIN, Project, Workspace};
+use crate::{common::Account, config::APTOS_BIN, Project};
 use anyhow::{anyhow, bail, Result};
-use aptos_crypto::ed25519::{Ed25519PrivateKey, Ed25519PublicKey};
 use command_group::{CommandGroup, GroupChild, Signal, UnixChildExt};
 use log::{debug, error, info};
-use move_core_types::account_address::AccountAddress;
-use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
-    fs,
     io::{BufRead, BufReader},
     path::Path,
     process::{Command, Stdio},
@@ -15,6 +10,8 @@ use std::{
     thread,
     thread::JoinHandle,
 };
+
+const ACCOUNT_INITIAL_FUND: u64 = 100000000;
 
 /// A subcommand group capturing the child execution
 pub struct Subcommand {
@@ -77,22 +74,21 @@ impl Subcommand {
 }
 
 /// Launch the local testnet
-pub fn launch_local_testnet(path: &Path, wks: &Workspace, restart: bool) -> Result<Subcommand> {
+pub fn init_local_testnet(wks: &Path) -> Result<Subcommand> {
     // spawn the process
     debug!("launching local testnet");
 
-    let mut cmd = Command::new(APTOS_BIN.as_path());
-    cmd.args(["node", "run-local-testnet", "--with-faucet"])
-        .arg("--test-dir")
-        .arg(&wks.testnet);
-    if restart {
-        cmd.arg("--force-restart");
-    }
-    cmd.current_dir(path)
+    let mut child = Command::new(APTOS_BIN.as_path())
+        .args([
+            "node",
+            "run-local-testnet",
+            "--with-faucet",
+            "--force-restart",
+        ])
+        .current_dir(wks)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = cmd.group_spawn()?;
+        .stderr(Stdio::piped())
+        .group_spawn()?;
 
     // prepare for reader threads
     let stderr = child.inner().stderr.take().expect("piped stderr");
@@ -145,8 +141,8 @@ pub fn launch_local_testnet(path: &Path, wks: &Workspace, restart: bool) -> Resu
     })
 }
 
-/// Populate workspace accounts
-pub fn init_local_testnet_profiles(project: &Project) -> Result<()> {
+/// Populate workspace accounts for project profiles
+pub fn init_project_accounts(project: &Project) -> Result<()> {
     for (name, account) in &project.named_accounts {
         match account {
             Account::Ref(_) => (),
@@ -170,7 +166,26 @@ pub fn init_local_testnet_profiles(project: &Project) -> Result<()> {
                     .spawn()?
                     .wait()?;
                 if !status.success() {
-                    bail!("failed to initialize profile {}", name);
+                    bail!("failed to initialize account {}", name);
+                }
+
+                // fund the account
+                let status = Command::new(APTOS_BIN.as_path())
+                    .args([
+                        "account",
+                        "fund-with-faucet",
+                        "--profile",
+                        name.as_str(),
+                        "--account",
+                        name.as_str(),
+                        "--amount",
+                        &ACCOUNT_INITIAL_FUND.to_string(),
+                    ])
+                    .current_dir(&project.root)
+                    .spawn()?
+                    .wait()?;
+                if !status.success() {
+                    bail!("failed to fund account {}", name);
                 }
             },
         }

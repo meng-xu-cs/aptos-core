@@ -18,8 +18,7 @@ log = { workspace = true }
 petgraph = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
-serde = { workspace = true }
-serde_yaml = { workspace = true }
+tempfile = { workspace = true }
 walkdir = { workspace = true }
 
 aptos-crypto = { path = "../../../../crates/aptos-crypto" }

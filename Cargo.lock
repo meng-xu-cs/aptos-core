@@ -10658,8 +10658,7 @@ dependencies = [
  "petgraph 0.5.1",
  "rand 0.7.3",
  "regex",
- "serde",
- "serde_yaml 0.8.26",
+ "tempfile",
  "walkdir",
 ]
 

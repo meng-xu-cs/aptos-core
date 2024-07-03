@@ -4,10 +4,7 @@ mod deps;
 mod package;
 mod testnet;
 
-use crate::{
-    common::{Project, Workspace},
-    deps::PkgManifest,
-};
+use crate::{common::Project, deps::PkgManifest};
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use log::{debug, info, LevelFilter};
@@ -17,13 +14,6 @@ use std::path::PathBuf;
 /// Commands for auditing
 #[derive(Subcommand)]
 pub enum AuditCommand {
-    /// Initialize the workspace
-    Init {
-        /// Clean-up previous states
-        #[clap(long)]
-        force: bool,
-    },
-
     /// List collected packages in the project
     List,
 
@@ -112,23 +102,6 @@ impl FilterPackage {
     }
 }
 
-fn cmd_init(project: Project, force: bool) -> Result<()> {
-    // prepare the workspace
-    let wks = Workspace::init(&project, force)?;
-
-    // launch the local testnet
-    let cmd = testnet::launch_local_testnet(&project.root, &wks, true)?;
-
-    // populate the profiles
-    let result = testnet::init_local_testnet_profiles(&project);
-
-    // shutdown the local testnet
-    cmd.interrupt()?;
-
-    // return the profile initialization result
-    result
-}
-
 fn cmd_list(project: Project) {
     for (manifest, is_primary) in project.pkgs {
         println!(
@@ -155,15 +128,19 @@ fn cmd_test(project: Project, filter: FilterPackage, compile_only: bool) -> Resu
     Ok(())
 }
 
-fn cmd_exec(project: Project) {
-    for (manifest, is_primary) in project.pkgs {
-        println!(
-            "{} [{}] :{}",
-            manifest.name,
-            manifest.version,
-            if is_primary { "primary" } else { "dependency" }
-        )
-    }
+fn cmd_exec(project: Project) -> Result<()> {
+    let wks = tempfile::tempdir()?;
+    let cmd = testnet::init_local_testnet(wks.path())?;
+
+    let result = testnet::init_project_accounts(&project)
+        .and_then(|_| testnet::init_project_accounts(&project));
+
+    // clean-up either on success or on failure
+    cmd.interrupt()?;
+    drop(wks);
+
+    // return the execution result
+    result
 }
 
 /// Entrypoint on multi-package auditing
@@ -192,9 +169,6 @@ pub fn run_on(
 
     // execute the command
     match command {
-        AuditCommand::Init { force } => {
-            cmd_init(project, force)?;
-        },
         AuditCommand::List => {
             cmd_list(project);
         },
@@ -205,7 +179,7 @@ pub fn run_on(
             cmd_test(project, pkg_filter, compile_only)?;
         },
         AuditCommand::Exec { .. } => {
-            cmd_exec(project);
+            cmd_exec(project)?;
         },
     }
 
