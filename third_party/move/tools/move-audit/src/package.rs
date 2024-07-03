@@ -5,7 +5,8 @@ use crate::{
 };
 use anyhow::{bail, Result};
 use move_core_types::account_address::AccountAddress;
-use std::{collections::BTreeMap, process::Command};
+use move_package::{compilation::compiled_package::CompiledPackage, BuildConfig};
+use std::{collections::BTreeMap, io, process::Command};
 
 fn collect_named_addresses(
     pkg: &PkgManifest,
@@ -42,11 +43,37 @@ fn collect_named_addresses(
     Ok(())
 }
 
+pub fn build(
+    pkg: &PkgManifest,
+    named_accounts: &BTreeMap<String, Account>,
+    for_test: bool,
+) -> Result<CompiledPackage> {
+    // collect assigned addresses
+    let mut named_addresses = BTreeMap::new();
+    collect_named_addresses(pkg, named_accounts, &mut named_addresses)?;
+
+    // build the package
+    let config = BuildConfig {
+        dev_mode: for_test,
+        test_mode: for_test,
+        skip_fetch_latest_git_deps: true,
+        additional_named_addresses: named_addresses,
+        ..Default::default()
+    };
+    config.compile_package(&pkg.path, &mut io::stdout())
+}
+
 pub fn exec_unit_test(
     pkg: &PkgManifest,
     named_accounts: &BTreeMap<String, Account>,
     compile_only: bool,
 ) -> Result<()> {
+    // use a separate route to compile the packages
+    if compile_only {
+        build(pkg, named_accounts, true)?;
+        return Ok(());
+    }
+
     // collect assigned addresses
     let mut named_addresses = BTreeMap::new();
     collect_named_addresses(pkg, named_accounts, &mut named_addresses)?;
@@ -56,11 +83,11 @@ pub fn exec_unit_test(
         .map(|(k, v)| format!("{}={}", k, v))
         .collect();
 
-    // NOTE: as a shortcut, call the aptos cli directly
+    // NOTE: as a shortcut, call the cli directly
     let status = Command::new(APTOS_BIN.as_path())
         .args([
             "move",
-            if compile_only { "compile" } else { "test" },
+            "test",
             "--skip-fetch-latest-git-deps",
             "--dev",
             "--named-addresses",

@@ -133,11 +133,12 @@ fn cmd_exec(project: Project) -> Result<()> {
     let cmd = testnet::init_local_testnet(wks)?;
 
     let Project {
-        pkgs: _,
+        pkgs,
         named_accounts,
     } = project;
 
-    let result = testnet::init_project_accounts(wks, &named_accounts);
+    let result = testnet::init_project_accounts(wks, &named_accounts)
+        .and_then(|_| testnet::publish_project_packages(wks, &pkgs, &named_accounts));
 
     // clean-up either on success or on failure
     cmd.interrupt()?;

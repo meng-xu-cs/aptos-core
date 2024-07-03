@@ -1,4 +1,4 @@
-use crate::{common::Account, config::APTOS_BIN, Project};
+use crate::{common::Account, config::APTOS_BIN, deps::PkgManifest, package, Project};
 use anyhow::{anyhow, bail, Result};
 use command_group::{CommandGroup, GroupChild, Signal, UnixChildExt};
 use log::{debug, error, info};
@@ -190,6 +190,24 @@ pub fn init_project_accounts(wks: &Path, named_accounts: &BTreeMap<String, Accou
                 }
             },
         }
+    }
+    Ok(())
+}
+
+/// Publish packages in the project
+pub fn publish_project_packages(
+    wks: &Path,
+    pkgs: &[(PkgManifest, bool)],
+    named_accounts: &BTreeMap<String, Account>,
+) -> Result<()> {
+    for (manifest, is_primary) in pkgs {
+        // only publish primary packages
+        if !*is_primary {
+            continue;
+        }
+
+        // compile the package first
+        let pkg = package::build(manifest, false)?;
     }
     Ok(())
 }

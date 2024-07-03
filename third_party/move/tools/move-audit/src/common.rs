@@ -4,8 +4,6 @@ use aptos_types::transaction::authenticator::AuthenticationKey;
 use move_core_types::account_address::AccountAddress;
 use std::collections::BTreeMap;
 
-const WORKSPACE_DIRECTORY: &str = ".aptos";
-
 /// Account (either referenced or owned)
 pub enum Account {
     Ref(AccountAddress),
