@@ -8,7 +8,7 @@ use crate::{
     common::{Project, Workspace},
     deps::PkgManifest,
 };
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use log::{debug, info, LevelFilter};
 use regex::Regex;

@@ -1,6 +1,6 @@
 use crate::{common::Account, Project};
 use anyhow::{bail, Result};
-use aptos_crypto::{ed25519::Ed25519PrivateKey, PrivateKey, Uniform};
+use aptos_crypto::{ed25519::Ed25519PrivateKey, Uniform};
 use log::debug;
 use move_core_types::account_address::AccountAddress;
 use move_package::{
