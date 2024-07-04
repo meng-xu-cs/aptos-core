@@ -20,8 +20,6 @@ use std::{
 };
 use walkdir::WalkDir;
 
-const DEFAULT_SCRIPTS_DIRECTORY: &str = "scripts";
-
 /// Mark where the package being audited is stored
 #[derive(Eq, PartialEq)]
 pub enum PkgLocation {
@@ -517,23 +515,9 @@ pub fn resolve(path: &Path, skip_deps_update: bool) -> Result<Project> {
         },
     }
 
-    // find move scripts with the project directory
-    let mut scripts = vec![];
-    for entry in WalkDir::new(path.join(DEFAULT_SCRIPTS_DIRECTORY)) {
-        let entry = entry?;
-        let entry_path = entry.into_path();
-        if entry_path.file_name().expect("filename") == "Move.toml" {
-            bail!("script directory should not contain Move packages");
-        }
-        if entry_path.extension().map_or(false, |e| e == "move") {
-            scripts.push(entry_path);
-        }
-    }
-
     // done
     Ok(Project {
         pkgs,
-        scripts,
         named_accounts,
     })
 }

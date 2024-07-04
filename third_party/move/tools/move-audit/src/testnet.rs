@@ -3,13 +3,15 @@ use anyhow::{anyhow, bail, Result};
 use aptos_crypto::{ed25519::Ed25519PrivateKey, Uniform};
 use command_group::{CommandGroup, GroupChild, Signal, UnixChildExt};
 use log::{debug, error, info};
-use move_compiler::compiled_unit::CompiledUnit;
+use move_binary_format::file_format::CompiledScript;
+use move_compiler::compiled_unit::{CompiledUnit, NamedCompiledScript};
+use move_package::compilation::compiled_package::{CompiledPackage, CompiledUnitWithSource};
 use rand::rngs::OsRng;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     io::{BufRead, BufReader},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, Condvar, Mutex},
     thread,
@@ -205,12 +207,74 @@ pub fn init_project_accounts(wks: &Path, named_accounts: &BTreeMap<String, Accou
     Ok(())
 }
 
-/// Publish packages in the project
+pub enum ScriptSigner {
+    Single(String, Option<Ed25519PrivateKey>),
+    Multi(Vec<(String, Option<Ed25519PrivateKey>)>),
+}
+
+pub struct ExecutableScript {
+    pub source: PathBuf,
+    pub script: CompiledScript,
+    pub signer: ScriptSigner,
+}
+
+fn extract_script(
+    source: &Path,
+    script: NamedCompiledScript,
+    named_accounts: &BTreeMap<String, Account>,
+) -> Result<ExecutableScript> {
+    let mut config = vec![];
+    let mut new_names = BTreeSet::new();
+
+    let content = fs::read_to_string(source)?;
+    for line in content.lines() {
+        let name = match line.strip_prefix("//:s ") {
+            None => {
+                // requires consecutive config lines
+                break;
+            },
+            Some(rest) => rest,
+        };
+
+        let key = if named_accounts.contains_key(name) {
+            None
+        } else {
+            if !new_names.insert(name.to_string()) {
+                bail!("the same signer is declared more than once: {}", name);
+            }
+            Some(Ed25519PrivateKey::generate(&mut OsRng))
+        };
+        config.push((name.to_string(), key));
+    }
+
+    // ensure that we have at least one signer
+    if config.is_empty() {
+        bail!("no signer is declared");
+    }
+
+    let signer = if config.len() == 1 {
+        let (name, new_key) = config.pop().unwrap();
+        ScriptSigner::Single(name, new_key)
+    } else {
+        ScriptSigner::Multi(config)
+    };
+
+    Ok(ExecutableScript {
+        source: source.canonicalize()?,
+        script: script.script,
+        signer,
+    })
+}
+
+/// Publish packages in the project and return executable scripts
 pub fn publish_project_packages(
     wks: &Path,
     pkgs: &[(PkgManifest, bool)],
     named_accounts: &BTreeMap<String, Account>,
-) -> Result<()> {
+) -> Result<Vec<ExecutableScript>> {
+    // collect executable scripts
+    let mut executables = vec![];
+
     for (manifest, is_primary) in pkgs {
         // only publish primary packages
         if !*is_primary {
@@ -218,20 +282,22 @@ pub fn publish_project_packages(
         }
 
         // compile the package first
-        let pkg = package::build(manifest, named_accounts, false)?;
+        let CompiledPackage {
+            compiled_package_info,
+            root_compiled_units,
+            ..
+        } = package::build(manifest, named_accounts, false)?;
 
-        // derive sender account
+        // derive sender account and also collect executable scripts
         let mut accounts = BTreeSet::new();
-        for unit in &pkg.root_compiled_units {
-            match &unit.unit {
+        for CompiledUnitWithSource { unit, source_path } in root_compiled_units {
+            match unit {
                 CompiledUnit::Module(module) => {
                     accounts.insert(module.address);
                 },
-                CompiledUnit::Script(_) => {
-                    bail!(
-                        "unexpected script in package to publish: {}",
-                        unit.source_path.to_string_lossy()
-                    );
+                CompiledUnit::Script(script) => {
+                    let exec_script = extract_script(&source_path, script, named_accounts)?;
+                    executables.push(exec_script);
                 },
             }
         }
@@ -255,8 +321,7 @@ pub fn publish_project_packages(
         };
 
         // reverse lookup the name
-        let mut filtered = pkg
-            .compiled_package_info
+        let mut filtered = compiled_package_info
             .address_alias_instantiation
             .iter()
             .filter_map(|(name, addr)| {
@@ -279,8 +344,7 @@ pub fn publish_project_packages(
         };
 
         // build named addresses for cli invocation
-        let named_address_pairs: Vec<_> = pkg
-            .compiled_package_info
+        let named_address_pairs: Vec<_> = compiled_package_info
             .address_alias_instantiation
             .iter()
             .map(|(k, v)| format!("{}={}", k, v))
@@ -312,112 +376,50 @@ pub fn publish_project_packages(
             bail!("failed to publish package {}", manifest.name);
         }
     }
-    Ok(())
+
+    // return the collected executables
+    Ok(executables)
 }
 
-fn extract_script_config(
-    path: &Path,
-    named_accounts: &BTreeMap<String, Account>,
-) -> Result<(BTreeMap<String, Ed25519PrivateKey>, String)> {
-    let mut new_keys = BTreeMap::new();
-    let mut signer = None;
+/// Execute a script
+pub fn execute_script(wks: &Path, exec: ExecutableScript) -> Result<()> {
+    let ExecutableScript {
+        source,
+        signer,
+        script,
+    } = exec;
 
-    let content = fs::read_to_string(path)?;
-    for line in content.lines() {
-        let config = match line.strip_prefix("//:") {
-            None => {
-                // requires consecutive config lines
-                break;
-            },
-            Some(rest) => rest,
-        };
+    // deserialize the script
+    let mut bytes = vec![];
+    script.serialize(&mut bytes)?;
 
-        let tokens: Vec<_> = config.split(' ').collect();
-        if tokens.len() != 2 {
-            bail!(
-                "invalid config line '{}' in script {}",
-                line,
-                path.to_string_lossy()
-            );
-        }
+    let exec_path = wks.join("executable.mv");
+    fs::write(&exec_path, bytes)?;
 
-        let val = tokens.last().unwrap().trim();
-        match *tokens.first().unwrap() {
-            "a" => {
-                if named_accounts.contains_key(val) {
-                    bail!("cannot re-declare a project account: {}", val);
-                }
-                if new_keys.contains_key(val) {
-                    bail!("the same account is declared more than once: {}", val);
-                }
-                new_keys.insert(val.to_string(), Ed25519PrivateKey::generate(&mut OsRng));
-            },
-            "s" => {
-                if signer.is_some() {
-                    bail!("signer is declared more than once");
-                }
-                if !named_accounts.contains_key(val) {
-                    if new_keys.contains_key(val) {
-                        bail!("the same account is declared more than once: {}", val);
-                    }
-                    new_keys.insert(val.to_string(), Ed25519PrivateKey::generate(&mut OsRng));
-                }
-                signer = Some(val.to_string());
-            },
-            _ => bail!(
-                "invalid config line '{}' in script {}",
-                line,
-                path.to_string_lossy()
-            ),
-        };
+    // prepare the signer
+    match signer {
+        ScriptSigner::Single(account, new_key) => {
+            if let Some(key) = new_key {
+                populate_account(wks, &account, &key)?;
+            }
+            // execute the script
+            let status = Command::new(APTOS_BIN.as_path())
+                .args(["move", "run-script"])
+                .arg("--compiled-script-path")
+                .arg(&exec_path)
+                .args(["--profile", &account, "--sender-account", &account])
+                .arg("--local")
+                .current_dir(wks)
+                .spawn()?
+                .wait()?;
+            if !status.success() {
+                bail!("failed to run script {}", source.to_string_lossy());
+            }
+        },
+
+        ScriptSigner::Multi(..) => unimplemented!("multi-sig not supported yet"),
     }
 
-    // ensure that we have a signer
-    let name = match signer {
-        None => bail!("no signer is declared"),
-        Some(s) => s,
-    };
-
-    Ok((new_keys, name))
-}
-
-/// Execute a move script
-pub fn execute_script(
-    wks: &Path,
-    index: usize,
-    script: &Path,
-    named_accounts: &BTreeMap<String, Account>,
-) -> Result<()> {
-    // extract configs
-    let (new_keys, signer) = extract_script_config(script, named_accounts)?;
-
-    let mut new_accounts = BTreeMap::new();
-    for (name, key) in new_keys {
-        populate_account(wks, &name, &key)?;
-        new_accounts.insert(name, Account::Owned(key));
-    }
-
-    // compile the script
-    let compiled = wks.join(format!("{}.mv", index));
-    let named_address_pairs: Vec<_> = named_accounts
-        .iter()
-        .chain(new_accounts.iter())
-        .map(|(k, v)| format!("{}={}", k, v.address()))
-        .collect();
-
-    let status = Command::new(APTOS_BIN.as_path())
-        .args(["move", "compile-script"])
-        .arg("--skip-fetch-latest-git-deps")
-        .args(["--named-addresses", &named_address_pairs.join(",")])
-        .arg("--output-file")
-        .arg(&compiled)
-        .arg(script)
-        .current_dir(wks)
-        .spawn()?
-        .wait()?;
-    if !status.success() {
-        bail!("failed to compile script {}", script.to_string_lossy());
-    }
-
+    // done
     Ok(())
 }

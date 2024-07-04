@@ -116,7 +116,6 @@ fn cmd_list(project: Project) {
 fn cmd_test(project: Project, filter: FilterPackage, compile_only: bool) -> Result<()> {
     let Project {
         pkgs,
-        scripts: _,
         named_accounts,
     } = project;
     for pkg in filter.apply(pkgs)? {
@@ -129,31 +128,39 @@ fn cmd_test(project: Project, filter: FilterPackage, compile_only: bool) -> Resu
 }
 
 fn cmd_exec(project: Project, script: Option<PathBuf>) -> Result<()> {
+    // canonicalize the path
+    let source = match script {
+        None => None,
+        Some(p) => Some(p.canonicalize()?),
+    };
+
     // initialize the project
     let Project {
         pkgs,
-        scripts,
         named_accounts,
     } = project;
-    let scripts = script.map_or(scripts, |p| vec![p]);
 
-    // a fresh environment for every script
-    for (index, script) in scripts.iter().enumerate() {
-        let tmp = tempfile::tempdir()?;
-        let wks = tmp.path();
-        let cmd = testnet::init_local_testnet(wks)?;
+    let tmp = tempfile::tempdir()?;
+    let wks = tmp.path();
+    let cmd = testnet::init_local_testnet(wks)?;
 
-        let result = testnet::init_project_accounts(wks, &named_accounts)
-            .and_then(|_| testnet::publish_project_packages(wks, &pkgs, &named_accounts))
-            .and_then(|_| testnet::execute_script(wks, index, script, &named_accounts));
+    let result = testnet::init_project_accounts(wks, &named_accounts)
+        .and_then(|_| testnet::publish_project_packages(wks, &pkgs, &named_accounts))
+        .and_then(|scripts| {
+            for script in scripts {
+                if source.as_ref().map_or(true, |p| p == &script.source) {
+                    testnet::execute_script(wks, script)?;
+                }
+            }
+            Ok(())
+        });
 
-        // clean-up either on success or on failure
-        cmd.interrupt()?;
-        drop(tmp);
+    // clean-up either on success or on failure
+    cmd.interrupt()?;
+    drop(tmp);
 
-        // short circuit if any script fails
-        result?;
-    }
+    // short circuit if any script fails
+    result?;
 
     // done
     Ok(())

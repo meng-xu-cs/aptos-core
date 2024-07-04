@@ -10654,6 +10654,7 @@ dependencies = [
  "hex",
  "lazy_static",
  "log",
+ "move-binary-format",
  "move-compiler",
  "move-core-types",
  "move-package",

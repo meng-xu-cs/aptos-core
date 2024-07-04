@@ -2,7 +2,7 @@ use crate::deps::PkgManifest;
 use aptos_crypto::{ed25519::Ed25519PrivateKey, PrivateKey};
 use aptos_types::transaction::authenticator::AuthenticationKey;
 use move_core_types::account_address::AccountAddress;
-use std::{collections::BTreeMap, path::PathBuf};
+use std::collections::BTreeMap;
 
 /// Account (either referenced or owned)
 pub enum Account {
@@ -22,6 +22,5 @@ impl Account {
 /// A Move audit project composed by a list of packages to audit
 pub struct Project {
     pub pkgs: Vec<(PkgManifest, bool)>,
-    pub scripts: Vec<PathBuf>,
     pub named_accounts: BTreeMap<String, Account>,
 }
