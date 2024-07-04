@@ -31,8 +31,7 @@ pub enum AuditCommand {
     /// Run end-to-end scripts in the simulated network
     Exec {
         /// Path to a concrete script file
-        #[clap(short, long)]
-        script: Option<PathBuf>,
+        script: PathBuf,
     },
 }
 
@@ -127,12 +126,9 @@ fn cmd_test(project: Project, filter: FilterPackage, compile_only: bool) -> Resu
     Ok(())
 }
 
-fn cmd_exec(project: Project, script: Option<PathBuf>) -> Result<()> {
+fn cmd_exec(project: Project, script: PathBuf) -> Result<()> {
     // canonicalize the path
-    let source = match script {
-        None => None,
-        Some(p) => Some(p.canonicalize()?),
-    };
+    let source = script.canonicalize()?;
 
     // initialize the project
     let Project {
@@ -146,13 +142,11 @@ fn cmd_exec(project: Project, script: Option<PathBuf>) -> Result<()> {
 
     let result = testnet::init_project_accounts(wks, &named_accounts)
         .and_then(|_| testnet::publish_project_packages(wks, &pkgs, &named_accounts))
-        .and_then(|scripts| {
-            for script in scripts {
-                if source.as_ref().map_or(true, |p| p == &script.source) {
-                    testnet::execute_script(wks, script)?;
-                }
-            }
-            Ok(())
+        .and_then(|mut scripts| {
+            let executable = scripts
+                .remove(&source)
+                .ok_or_else(|| anyhow!("no such script: {}", source.to_string_lossy()))?;
+            testnet::execute_script(wks, &source, executable)
         });
 
     // clean-up either on success or on failure

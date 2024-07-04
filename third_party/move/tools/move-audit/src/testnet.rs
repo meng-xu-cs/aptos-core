@@ -213,7 +213,6 @@ pub enum ScriptSigner {
 }
 
 pub struct ExecutableScript {
-    pub source: PathBuf,
     pub script: CompiledScript,
     pub signer: ScriptSigner,
 }
@@ -260,7 +259,6 @@ fn extract_script(
     };
 
     Ok(ExecutableScript {
-        source: source.canonicalize()?,
         script: script.script,
         signer,
     })
@@ -271,9 +269,9 @@ pub fn publish_project_packages(
     wks: &Path,
     pkgs: &[(PkgManifest, bool)],
     named_accounts: &BTreeMap<String, Account>,
-) -> Result<Vec<ExecutableScript>> {
+) -> Result<BTreeMap<PathBuf, ExecutableScript>> {
     // collect executable scripts
-    let mut executables = vec![];
+    let mut executables = BTreeMap::new();
 
     for (manifest, is_primary) in pkgs {
         // only publish primary packages
@@ -296,8 +294,12 @@ pub fn publish_project_packages(
                     accounts.insert(module.address);
                 },
                 CompiledUnit::Script(script) => {
-                    let exec_script = extract_script(&source_path, script, named_accounts)?;
-                    executables.push(exec_script);
+                    let path_script = source_path.canonicalize()?;
+                    let exec_script = extract_script(&path_script, script, named_accounts)?;
+                    let existing = executables.insert(path_script, exec_script);
+                    if existing.is_some() {
+                        bail!("symbolic links in the script paths is not supported");
+                    }
                 },
             }
         }
@@ -382,12 +384,9 @@ pub fn publish_project_packages(
 }
 
 /// Execute a script
-pub fn execute_script(wks: &Path, exec: ExecutableScript) -> Result<()> {
-    let ExecutableScript {
-        source,
-        signer,
-        script,
-    } = exec;
+pub fn execute_script(wks: &Path, path: &Path, exec: ExecutableScript) -> Result<()> {
+    info!("executing script {}", path.to_string_lossy());
+    let ExecutableScript { signer, script } = exec;
 
     // deserialize the script
     let mut bytes = vec![];
@@ -413,7 +412,7 @@ pub fn execute_script(wks: &Path, exec: ExecutableScript) -> Result<()> {
                 .spawn()?
                 .wait()?;
             if !status.success() {
-                bail!("failed to run script {}", source.to_string_lossy());
+                bail!("failed to execute script {}", path.to_string_lossy());
             }
         },
 
