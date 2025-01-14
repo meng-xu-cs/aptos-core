@@ -38,7 +38,7 @@ pub fn provision_simulator(simulator: &mut Simulator, project: &Project) -> Resu
     info!("pre-compiling packages");
     let compiled_pkgs: Vec<_> = pkgs
         .iter()
-        .map(|(manifest, _)| package::build(manifest, named_accounts, *language, false))
+        .map(|pkg| package::build(pkg.as_manifest(), named_accounts, *language, false))
         .collect::<Result<_>>()?;
 
     // populate accounts for project profiles
@@ -65,7 +65,8 @@ pub fn provision_simulator(simulator: &mut Simulator, project: &Project) -> Resu
     let mut num_published = 0;
 
     // publish packages in the given order
-    for ((manifest, _), compiled) in pkgs.iter().zip(compiled_pkgs) {
+    for (pkg, compiled) in pkgs.iter().zip(compiled_pkgs) {
+        let manifest = pkg.as_manifest();
         let CompiledPackage {
             compiled_package_info,
             root_compiled_units,

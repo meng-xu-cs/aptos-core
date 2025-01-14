@@ -1,5 +1,5 @@
 use crate::{
-    common::{Account, LanguageSetting},
+    common::{Account, LanguageSetting, PkgDeclaration},
     Project,
 };
 use anyhow::{anyhow, bail, Result};
@@ -352,7 +352,7 @@ fn analyze_package_manifest(
                 dep_name,
                 &dep_info,
                 skip_deps_update,
-                &mut std::io::stdout(),
+                &mut io::stdout(),
             )?;
         }
 
@@ -565,9 +565,25 @@ pub fn resolve(
                 let key = graph.node_weight(node).expect("node");
                 let pkg = analyzed_pkgs
                     .remove(key)
-                    .unwrap_or_else(|| panic!("expect package with name {}", key));
+                    .unwrap_or_else(|| panic!("expect package with name {key}"));
                 let is_primary = primary_pkgs.contains(key);
-                pkgs.push((pkg, is_primary));
+                let is_framework = matches!(
+                    key.as_str(),
+                    "MoveStdlib"
+                        | "AptosStdlib"
+                        | "AptosFramework"
+                        | "AptosToken"
+                        | "AptosTokenObjects"
+                );
+                let decl = match (is_primary, is_framework) {
+                    (true, true) => {
+                        bail!("analyzing Aptos framework package '{key}' is not supported")
+                    },
+                    (true, false) => PkgDeclaration::Primary(pkg),
+                    (false, true) => PkgDeclaration::Framework(pkg),
+                    (false, false) => PkgDeclaration::Dependency(pkg),
+                };
+                pkgs.push(decl);
             }
         },
         Err(cycle) => {
@@ -581,9 +597,14 @@ pub fn resolve(
     }
 
     // instantiate templates in the Move source code in the packages
-    for (pkg, _) in &pkgs {
+    for pkg in &pkgs {
         let mut stack = vec![];
-        instantiate_all(&language, &pkg.path, &named_accounts, &mut stack)?;
+        instantiate_all(
+            &language,
+            &pkg.as_manifest().path,
+            &named_accounts,
+            &mut stack,
+        )?;
         assert!(stack.is_empty());
     }
 
