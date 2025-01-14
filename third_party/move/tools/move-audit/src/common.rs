@@ -10,7 +10,7 @@ use move_binary_format::{
 };
 use move_core_types::{account_address::AccountAddress, u256};
 use move_model::metadata::{CompilerVersion, LanguageVersion};
-use move_package::CompilerConfig;
+use move_package::{compilation::compiled_package::CompiledPackage, CompilerConfig};
 use std::{collections::BTreeMap, process::Command, str::FromStr};
 
 /// Account (either referenced or owned)
@@ -213,9 +213,29 @@ impl TxnArgTypeWithRef {
     }
 }
 
+/// A wrapper over package manifest that also marks what kind of package this is
+pub enum PkgDeclaration {
+    /// primary package to be analyzed
+    Primary(PkgManifest),
+    /// a direct or transitive dependency of a primary package
+    Dependency(PkgManifest),
+    /// a dependency that is also part of the Aptos Framework
+    Framework(PkgManifest),
+}
+
+impl PkgDeclaration {
+    pub fn as_manifest(&self) -> &PkgManifest {
+        match self {
+            Self::Primary(manifest) | Self::Dependency(manifest) | Self::Framework(manifest) => {
+                manifest
+            },
+        }
+    }
+}
+
 /// A Move audit project composed by a list of packages to audit
 pub struct Project {
-    pub pkgs: Vec<(PkgManifest, bool)>,
+    pub pkgs: Vec<PkgDeclaration>,
     pub named_accounts: BTreeMap<String, Account>,
     pub language: LanguageSetting,
 }
@@ -356,5 +376,25 @@ impl LanguageSetting {
             OptLevel::None => command.args(["--optimize", "none"]),
             OptLevel::Extra => command.args(["--optimize", "extra"]),
         };
+    }
+}
+
+/// A wrapper over CompiledPackage that also marks what kind of package this is
+pub enum PkgDefinition {
+    /// primary package to be analyzed
+    Primary(CompiledPackage),
+    /// a direct or transitive dependency of a primary package
+    Dependency(CompiledPackage),
+    /// a dependency that is also part of the Aptos Framework
+    Framework(CompiledPackage),
+}
+
+impl PkgDefinition {
+    pub fn as_compiled_package(&self) -> &CompiledPackage {
+        match self {
+            Self::Primary(compiled) | Self::Dependency(compiled) | Self::Framework(compiled) => {
+                compiled
+            },
+        }
     }
 }
