@@ -1,5 +1,6 @@
 mod common;
 mod deps;
+mod fuzz;
 mod package;
 mod simulator;
 mod subexec;
@@ -8,8 +9,8 @@ mod testnet;
 // export this symbol
 pub use crate::common::LanguageSetting;
 use crate::{
-    common::Project,
-    deps::PkgManifest,
+    common::{PkgDeclaration, PkgDefinition, Project},
+    fuzz::model::FuzzModel,
     simulator::Simulator,
     testnet::{execute_runbook, provision_simulator},
 };
@@ -83,6 +84,10 @@ pub struct FilterPackage {
     #[clap(long)]
     include_deps: bool,
 
+    /// Include Aptos Framework packages
+    #[clap(long)]
+    include_framework: bool,
+
     /// Allow-list
     #[clap(long)]
     include_pkg: Option<Vec<String>>,
@@ -93,13 +98,13 @@ pub struct FilterPackage {
 }
 
 impl FilterPackage {
-    fn apply(&self, pkgs: Vec<(PkgManifest, bool)>) -> Result<Vec<PkgManifest>> {
+    fn apply(&self, pkgs: Vec<PkgDeclaration>) -> Result<Vec<PkgDeclaration>> {
         let include_regex = match self.include_pkg.as_ref() {
             None => None,
             Some(patterns) => Some(
                 patterns
                     .iter()
-                    .map(|p| Regex::new(&format!("^{}$", p)).map_err(|e| anyhow!(e)))
+                    .map(|p| Regex::new(&format!("^{p}$")).map_err(|e| anyhow!(e)))
                     .collect::<Result<Vec<_>>>()?,
             ),
         };
@@ -108,17 +113,27 @@ impl FilterPackage {
             Some(patterns) => Some(
                 patterns
                     .iter()
-                    .map(|p| Regex::new(&format!("^{}$", p)).map_err(|e| anyhow!(e)))
+                    .map(|p| Regex::new(&format!("^{p}$")).map_err(|e| anyhow!(e)))
                     .collect::<Result<Vec<_>>>()?,
             ),
         };
 
         // filtering logic: include first then exclude
         let mut filtered = vec![];
-        for (manifest, is_primary) in pkgs {
-            if !is_primary && !self.include_deps {
-                continue;
+        for pkg in pkgs {
+            // filter based on type
+            match &pkg {
+                PkgDeclaration::Framework(_) if !self.include_framework => {
+                    continue;
+                },
+                PkgDeclaration::Dependency(_) if !self.include_deps => {
+                    continue;
+                },
+                _ => (),
             }
+
+            // filter based on name
+            let manifest = pkg.as_manifest();
             match include_regex.as_ref() {
                 None => (),
                 Some(regexes) => {
@@ -135,7 +150,9 @@ impl FilterPackage {
                     }
                 },
             }
-            filtered.push(manifest);
+
+            // if the control flow reaches here, we need to include this package
+            filtered.push(pkg);
         }
 
         Ok(filtered)
@@ -143,13 +160,13 @@ impl FilterPackage {
 }
 
 fn cmd_list(project: Project) {
-    for (manifest, is_primary) in project.pkgs {
-        println!(
-            "{} [{}] :{}",
-            manifest.name,
-            manifest.version,
-            if is_primary { "primary" } else { "dependency" }
-        )
+    for pkg in project.pkgs {
+        let (kind, manifest) = match pkg {
+            PkgDeclaration::Primary(manifest) => ("primary", manifest),
+            PkgDeclaration::Dependency(manifest) => ("dependency", manifest),
+            PkgDeclaration::Framework(manifest) => ("framework", manifest),
+        };
+        println!("{} [{}] :{kind}", manifest.name, manifest.version,)
     }
 }
 
@@ -164,26 +181,27 @@ fn cmd_test(
         language,
     } = project;
     for pkg in pkg_filter.apply(pkgs)? {
+        let manifest = pkg.as_manifest();
         match command.as_ref() {
             None => {
-                info!("running unit tests for package {}", pkg.name);
-                package::exec_unit_test(&pkg, &named_accounts, language, None)?;
+                info!("running unit tests for package {}", manifest.name);
+                package::exec_unit_test(manifest, &named_accounts, language, None)?;
             },
             Some(PkgCommand::Filter { pattern }) => {
-                info!("running unit tests for package {}", pkg.name);
-                package::exec_unit_test(&pkg, &named_accounts, language, Some(pattern))?;
+                info!("running unit tests for package {}", manifest.name);
+                package::exec_unit_test(manifest, &named_accounts, language, Some(pattern))?;
             },
             Some(PkgCommand::Compile) => {
-                info!("compiling package {}", pkg.name);
-                package::build(&pkg, &named_accounts, language, true)?;
+                info!("compiling package {}", manifest.name);
+                package::build(manifest, &named_accounts, language, true)?;
             },
             Some(PkgCommand::Format { config }) => {
-                info!("formatting package {}", pkg.name);
-                package::format_code(&pkg, config.as_deref())?;
+                info!("formatting package {}", manifest.name);
+                package::format_code(manifest, config.as_deref())?;
             },
             Some(PkgCommand::Doc) => {
-                info!("generating documents for package {}", pkg.name);
-                package::gen_docs(&pkg, &named_accounts, language)?;
+                info!("generating documents for package {}", manifest.name);
+                package::gen_docs(manifest, &named_accounts, language)?;
             },
         }
     }
@@ -216,16 +234,41 @@ fn cmd_fuzz(project: Project, pkg_filter: FilterPackage) -> Result<()> {
         );
     }
 
+    // we need to see all packages unless the package is explicitly excluded
+    if !pkg_filter.include_framework {
+        bail!("fuzzer requires the `--include-framework` flag");
+    }
+    if !pkg_filter.include_deps {
+        bail!("fuzzer requires the `--include-deps` flag");
+    }
+
     // build all packages initially, this is also a sanity check on the packages
     let Project {
         pkgs,
         named_accounts,
         language,
     } = project;
+
+    let mut compiled_packages = vec![];
     for pkg in pkg_filter.apply(pkgs)? {
-        info!("compiling package {}", pkg.name);
-        package::build(&pkg, &named_accounts, language, false)?;
+        let manifest = pkg.as_manifest();
+        info!("compiling package {}", manifest.name);
+        let pkg_built = package::build(manifest, &named_accounts, language, false)?;
+
+        let pkg_def = match pkg {
+            PkgDeclaration::Primary(_) => PkgDefinition::Primary(pkg_built),
+            PkgDeclaration::Dependency(_) => PkgDefinition::Dependency(pkg_built),
+            PkgDeclaration::Framework(_) => PkgDefinition::Framework(pkg_built),
+        };
+        compiled_packages.push(pkg_def);
     }
+
+    // build a model about the packages to be fuzzed
+    info!(
+        "building a model for {} packages to be fuzzed",
+        compiled_packages.len()
+    );
+    FuzzModel::new(&compiled_packages);
 
     // TODO: fuzzing logic
 
