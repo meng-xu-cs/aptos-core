@@ -4,6 +4,7 @@ use crate::{
     simulator::{move_format, move_gen_docs, move_unit_test},
 };
 use anyhow::{bail, Result};
+use log::LevelFilter;
 use move_core_types::account_address::AccountAddress;
 use move_package::{compilation::compiled_package::CompiledPackage, BuildConfig};
 use std::{collections::BTreeMap, io, path::Path};
@@ -65,7 +66,14 @@ pub fn build(
         compiler_config: language.derive_compilation_config(),
         ..Default::default()
     };
-    config.compile_package(&pkg.path, &mut io::stdout())
+
+    // HACK: silence logging in compilation
+    let log_level = log::max_level();
+    log::set_max_level(LevelFilter::Off);
+    let compiled_package = config.compile_package(&pkg.path, &mut io::stdout())?;
+    log::set_max_level(log_level);
+
+    Ok(compiled_package)
 }
 
 pub fn exec_unit_test(
