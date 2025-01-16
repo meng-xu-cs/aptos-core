@@ -10800,6 +10800,7 @@ dependencies = [
  "aptos-cached-packages",
  "aptos-crypto",
  "aptos-framework",
+ "aptos-gas-meter",
  "aptos-gas-schedule",
  "aptos-language-e2e-tests",
  "aptos-types",
