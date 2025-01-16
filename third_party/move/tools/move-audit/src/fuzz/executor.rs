@@ -5,6 +5,7 @@ use crate::{
 use anyhow::{anyhow, bail, Result};
 use aptos_cached_packages::aptos_stdlib;
 use aptos_framework::{BuiltPackage, UPGRADE_POLICY_CUSTOM_FIELD};
+use aptos_gas_schedule::VMGasParameters;
 use aptos_language_e2e_tests::{
     account::{Account, AccountData},
     data_store::{FakeDataStore, GENESIS_CHANGE_SET_HEAD},
@@ -16,6 +17,12 @@ use aptos_types::{
     on_chain_config::{FeatureFlag, Features, OnChainConfig},
     state_store::{state_key::StateKey, TStateView},
     transaction::TransactionPayload,
+};
+use aptos_vm::{data_cache::AsMoveResolver, gas::make_prod_gas_meter, AptosVM};
+use aptos_vm_environment::environment::AptosEnvironment;
+use aptos_vm_logging::log_schema::AdapterLogSchema;
+use aptos_vm_types::{
+    module_and_script_storage::AsAptosCodeStorage, storage::StorageGasParameters,
 };
 use move_compiler::compiled_unit::CompiledUnit;
 use move_core_types::{
@@ -47,6 +54,40 @@ impl PackageHooks for AptosPackageHooks {
     }
 }
 
+/// Gas consumption profile
+enum GasProfile {
+    Constant {
+        price_per_gas_unit: u64,
+        max_gas_units_per_txn: u64,
+    },
+}
+
+impl GasProfile {
+    pub fn new_constant(data_store: &FakeDataStore) -> Self {
+        let env = AptosEnvironment::new(data_store);
+        let params = &env
+            .gas_params()
+            .as_ref()
+            .unwrap_or_else(|why| panic!("gas profile does not exist in genesis: {why}"))
+            .vm
+            .txn;
+        Self::Constant {
+            price_per_gas_unit: params.min_price_per_gas_unit.into(),
+            max_gas_units_per_txn: params.maximum_number_of_gas_units.into(),
+        }
+    }
+
+    /// Return gas information needed for transaction
+    pub fn get_config_for_txn(&self) -> (u64, u64) {
+        match self {
+            GasProfile::Constant {
+                price_per_gas_unit,
+                max_gas_units_per_txn,
+            } => (*price_per_gas_unit, *max_gas_units_per_txn),
+        }
+    }
+}
+
 /// A stateful executor
 pub struct TracingExecutor {
     /// memory-backed data store
@@ -56,6 +97,9 @@ pub struct TracingExecutor {
 
     /// address registry
     address_registry: AddressRegistry,
+
+    /// gas profile we are following now
+    gas_profile: GasProfile,
 }
 
 impl TracingExecutor {
@@ -68,11 +112,15 @@ impl TracingExecutor {
         data_store.set_chain_id(ChainId::test());
         data_store.add_write_set(GENESIS_CHANGE_SET_HEAD.write_set());
 
+        // derive the gas profile
+        let gas_profile = GasProfile::new_constant(&data_store);
+
         // pack them
         Self {
             data_store,
             event_store: Vec::new(),
             address_registry: AddressRegistry::new(),
+            gas_profile,
         }
     }
 
@@ -136,11 +184,46 @@ impl TracingExecutor {
                 )
             });
 
-        account
+        // construct the transaction
+        let (gas_unit_price, max_gas_amount) = self.gas_profile.get_config_for_txn();
+        let signed_txn = account
             .transaction()
             .sequence_number(self.get_account_sequence_number(account))
+            .gas_unit_price(gas_unit_price)
+            .max_gas_amount(max_gas_amount)
             .payload(payload)
             .sign();
+
+        // execute the transaction using our own config of the VM
+        let env = AptosEnvironment::new(&self.data_store);
+        let vm = AptosVM::new(env.clone(), &self.data_store);
+        let resolver = self.data_store.as_move_resolver();
+        let code_storage = self.data_store.as_aptos_code_storage(env.clone());
+        let log_context = AdapterLogSchema::new(self.data_store.id(), 0);
+
+        let x = vm.execute_user_transaction_with_custom_gas_meter(
+            &resolver,
+            &code_storage,
+            &signed_txn,
+            &log_context,
+            |gas_feature_version, _, _, is_approved_gov_script, meter_balance| {
+                make_prod_gas_meter(
+                    gas_feature_version,
+                    VMGasParameters::zeros(),
+                    StorageGasParameters::unlimited(),
+                    is_approved_gov_script,
+                    meter_balance,
+                )
+            },
+        );
+        match x {
+            Ok((status, output, _)) => {
+                log::info!("on success: {status:?}, {output:?}");
+            },
+            Err(status) => {
+                log::info!("on failure: {status:?}");
+            },
+        }
 
         // TODO: set gas
     }
