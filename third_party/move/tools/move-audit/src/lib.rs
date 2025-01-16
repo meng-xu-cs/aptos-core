@@ -11,7 +11,7 @@ mod utils;
 pub use crate::common::LanguageSetting;
 use crate::{
     common::{PkgDeclaration, PkgDefinition, Project},
-    fuzz::model::FuzzModel,
+    fuzz::executor::TracingExecutor,
     simulator::Simulator,
     testnet::{execute_runbook, provision_simulator},
 };
@@ -250,26 +250,23 @@ fn cmd_fuzz(project: Project, pkg_filter: FilterPackage) -> Result<()> {
         language,
     } = project;
 
-    let mut compiled_packages = vec![];
-    for pkg in pkg_filter.apply(pkgs)? {
-        let manifest = pkg.as_manifest();
+    let mut pkg_defs = vec![];
+    for pkg_decl in pkg_filter.apply(pkgs)? {
+        let manifest = pkg_decl.as_manifest();
         info!("compiling package {}", manifest.name);
         let pkg_built = package::build(manifest, &named_accounts, language, false)?;
 
-        let pkg_def = match pkg {
+        let pkg_def = match pkg_decl {
             PkgDeclaration::Primary(_) => PkgDefinition::Primary(pkg_built),
             PkgDeclaration::Dependency(_) => PkgDefinition::Dependency(pkg_built),
             PkgDeclaration::Framework(_) => PkgDefinition::Framework(pkg_built),
         };
-        compiled_packages.push(pkg_def);
+        pkg_defs.push(pkg_def);
     }
 
-    // build a model about the packages to be fuzzed
-    info!(
-        "building a model for {} packages to be fuzzed",
-        compiled_packages.len()
-    );
-    FuzzModel::new(&compiled_packages);
+    // initialize the tracing executor
+    let mut executor = TracingExecutor::new();
+    executor.provision(&pkg_defs)?;
 
     // TODO: fuzzing logic
 
