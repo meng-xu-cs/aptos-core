@@ -316,7 +316,7 @@ impl LanguageSetting {
             compiler_version: Some(match version {
                 LanguageVersion::V1 => CompilerVersion::V1,
                 LanguageVersion::V2_0 => CompilerVersion::V2_0,
-                LanguageVersion::V2_1 => CompilerVersion::V2_1,
+                LanguageVersion::V2_1 => CompilerVersion::V2_0,
                 LanguageVersion::V2_2 => CompilerVersion::V2_1,
             }),
             bytecode_version: Some(match version {
