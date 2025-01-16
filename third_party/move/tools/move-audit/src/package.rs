@@ -6,10 +6,9 @@ use crate::{
 };
 use anyhow::{bail, Result};
 use aptos_framework::{BuildOptions, BuiltPackage};
-use log::LevelFilter;
 use move_core_types::account_address::AccountAddress;
 use move_package::CompilerConfig;
-use std::{collections::BTreeMap, io, path::Path};
+use std::{collections::BTreeMap, path::Path};
 
 fn collect_named_addresses(
     pkg: &PkgManifest,
