@@ -5,6 +5,7 @@ mod package;
 mod simulator;
 mod subexec;
 mod testnet;
+mod utils;
 
 // export this symbol
 pub use crate::common::LanguageSetting;

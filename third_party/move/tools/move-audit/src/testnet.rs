@@ -36,7 +36,7 @@ pub fn provision_simulator(simulator: &mut Simulator, project: &Project) -> Resu
 
     // pre-compile packages to get compiled metadata
     info!("pre-compiling packages");
-    let compiled_pkgs: Vec<_> = pkgs
+    let built_pkgs: Vec<_> = pkgs
         .iter()
         .map(|pkg| package::build(pkg.as_manifest(), named_accounts, *language, false))
         .collect::<Result<_>>()?;
@@ -65,13 +65,13 @@ pub fn provision_simulator(simulator: &mut Simulator, project: &Project) -> Resu
     let mut num_published = 0;
 
     // publish packages in the given order
-    for (pkg, compiled) in pkgs.iter().zip(compiled_pkgs) {
-        let manifest = pkg.as_manifest();
+    for (pkg_decl, pkg_built) in pkgs.iter().zip(built_pkgs) {
+        let manifest = pkg_decl.as_manifest();
         let CompiledPackage {
             compiled_package_info,
             root_compiled_units,
             ..
-        } = compiled;
+        } = pkg_built.package;
 
         // derive sender account and also collect modules and scripts
         let mut accounts = BTreeSet::new();

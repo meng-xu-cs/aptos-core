@@ -1,7 +1,7 @@
 use crate::deps::PkgManifest;
 use anyhow::{bail, Result};
 use aptos_crypto::{ed25519::Ed25519PrivateKey, PrivateKey};
-use aptos_framework::extended_checks;
+use aptos_framework::{extended_checks, BuiltPackage};
 use aptos_types::transaction::authenticator::AuthenticationKey;
 use move_binary_format::{
     binary_views::BinaryIndexedView,
@@ -10,7 +10,7 @@ use move_binary_format::{
 };
 use move_core_types::{account_address::AccountAddress, u256};
 use move_model::metadata::{CompilerVersion, LanguageVersion};
-use move_package::{compilation::compiled_package::CompiledPackage, CompilerConfig};
+use move_package::CompilerConfig;
 use std::{collections::BTreeMap, process::Command, str::FromStr};
 
 /// Account (either referenced or owned)
@@ -382,19 +382,17 @@ impl LanguageSetting {
 /// A wrapper over CompiledPackage that also marks what kind of package this is
 pub enum PkgDefinition {
     /// primary package to be analyzed
-    Primary(CompiledPackage),
+    Primary(BuiltPackage),
     /// a direct or transitive dependency of a primary package
-    Dependency(CompiledPackage),
+    Dependency(BuiltPackage),
     /// a dependency that is also part of the Aptos Framework
-    Framework(CompiledPackage),
+    Framework(BuiltPackage),
 }
 
 impl PkgDefinition {
-    pub fn as_compiled_package(&self) -> &CompiledPackage {
+    pub fn as_built_package(&self) -> &BuiltPackage {
         match self {
-            Self::Primary(compiled) | Self::Dependency(compiled) | Self::Framework(compiled) => {
-                compiled
-            },
+            Self::Primary(p) | Self::Dependency(p) | Self::Framework(p) => p,
         }
     }
 }
