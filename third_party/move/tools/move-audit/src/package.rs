@@ -2,11 +2,13 @@ use crate::{
     common::{Account, LanguageSetting},
     deps::{PkgManifest, PkgNamedAddr},
     simulator::{move_format, move_gen_docs, move_unit_test},
+    utils,
 };
 use anyhow::{bail, Result};
+use aptos_framework::{BuildOptions, BuiltPackage};
 use log::LevelFilter;
 use move_core_types::account_address::AccountAddress;
-use move_package::{compilation::compiled_package::CompiledPackage, BuildConfig};
+use move_package::CompilerConfig;
 use std::{collections::BTreeMap, io, path::Path};
 
 fn collect_named_addresses(
@@ -49,31 +51,48 @@ pub fn build(
     named_accounts: &BTreeMap<String, Account>,
     language: LanguageSetting,
     for_test: bool,
-) -> Result<CompiledPackage> {
+) -> Result<BuiltPackage> {
     // collect assigned addresses
     let mut named_addresses = BTreeMap::new();
     collect_named_addresses(pkg, named_accounts, &mut named_addresses)?;
 
-    // build the package
-    let config = BuildConfig {
-        dev_mode: for_test,
-        test_mode: for_test,
-        force_recompilation: true,
-        generate_move_model: true,
-        full_model_generation: for_test,
+    // fill the build options
+    let CompilerConfig {
+        bytecode_version,
+        language_version,
+        compiler_version,
+        known_attributes,
+        skip_attribute_checks,
+        experiments,
+    } = language.derive_compilation_config();
+
+    let options = BuildOptions {
+        dev: for_test,
+        check_test_code: for_test,
+        named_addresses,
         skip_fetch_latest_git_deps: true,
-        additional_named_addresses: named_addresses,
-        compiler_config: language.derive_compilation_config(),
-        ..Default::default()
+        bytecode_version,
+        compiler_version,
+        language_version,
+        known_attributes,
+        skip_attribute_checks,
+        experiments,
+        // following a minimal config for the rest of the options
+        with_abis: false,
+        with_docs: false,
+        with_srcs: false,
+        with_source_maps: false,
+        with_error_map: false,
+        install_dir: None,
+        override_std: None,
+        docgen_options: None,
     };
 
+    // build the package
     // HACK: silence logging in compilation
-    let log_level = log::max_level();
-    log::set_max_level(LevelFilter::Off);
-    let compiled_package = config.compile_package(&pkg.path, &mut io::stdout())?;
-    log::set_max_level(log_level);
-
-    Ok(compiled_package)
+    let package_built =
+        utils::with_logging_disabled(|| BuiltPackage::build(pkg.path.clone(), options))?;
+    Ok(package_built)
 }
 
 pub fn exec_unit_test(
