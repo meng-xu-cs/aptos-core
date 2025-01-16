@@ -2,31 +2,38 @@ use crate::{
     common::PkgDefinition,
     fuzz::account::{AddressRegistry, NamedAddressKind},
 };
-use anyhow::{anyhow, bail, Result};
+use anyhow::{bail, Result};
 use aptos_cached_packages::aptos_stdlib;
 use aptos_framework::{BuiltPackage, UPGRADE_POLICY_CUSTOM_FIELD};
-use aptos_gas_schedule::VMGasParameters;
+use aptos_gas_meter::{StandardGasAlgebra, StandardGasMeter};
+use aptos_gas_schedule::{InstructionGasParameters, MiscGasParameters, VMGasParameters};
 use aptos_language_e2e_tests::{
     account::{Account, AccountData},
     data_store::{FakeDataStore, GENESIS_CHANGE_SET_HEAD},
 };
 use aptos_types::{
-    account_config::AccountResource,
+    account_config::{
+        AccountResource, CoinInfoResource, ConcurrentSupplyResource, ObjectGroupResource,
+    },
     chain_id::ChainId,
     contract_event::ContractEvent,
     on_chain_config::{FeatureFlag, Features, OnChainConfig},
     state_store::{state_key::StateKey, TStateView},
-    transaction::TransactionPayload,
+    transaction::{ExecutionStatus, TransactionOutput, TransactionPayload, TransactionStatus},
+    write_set::{WriteOp, WriteSetMut},
+    AptosCoinType, CoinType,
 };
-use aptos_vm::{data_cache::AsMoveResolver, gas::make_prod_gas_meter, AptosVM};
+use aptos_vm::{data_cache::AsMoveResolver, AptosVM};
 use aptos_vm_environment::environment::AptosEnvironment;
 use aptos_vm_logging::log_schema::AdapterLogSchema;
 use aptos_vm_types::{
-    module_and_script_storage::AsAptosCodeStorage, storage::StorageGasParameters,
+    module_and_script_storage::AsAptosCodeStorage, output::VMOutput, storage::StorageGasParameters,
 };
 use move_compiler::compiled_unit::CompiledUnit;
 use move_core_types::{
-    account_address::AccountAddress, language_storage::StructTag, move_resource::MoveStructType,
+    account_address::AccountAddress,
+    move_resource::MoveResource,
+    vm_status::{DiscardedVMStatus, VMStatus},
 };
 use move_package::{
     compilation::compiled_package::CompiledUnitWithSource,
@@ -34,8 +41,11 @@ use move_package::{
     source_package::parsed_manifest::CustomDepInfo,
 };
 use move_symbol_pool::Symbol;
-use serde::de::DeserializeOwned;
+use serde::{de::DeserializeOwned, Serialize};
 use std::collections::BTreeSet;
+
+/// Default APT fund per each new account (10M, with 8 decimals)
+const INITIAL_APT_BALANCE: u64 = 1_000_000_000_000_000;
 
 /// A utility struct for providing the `PackageHooks` implementation
 struct AptosPackageHooks;
@@ -124,55 +134,149 @@ impl TracingExecutor {
         }
     }
 
-    /// Create an account with no balance of APT
-    fn create_account(&mut self, account: Account) {
-        let features = Features::fetch_config(&self.data_store).unwrap_or_default();
+    /// Create an account, and fund it with an initial balance if needed
+    fn create_account(&mut self, account: Account, balance: u64) {
+        let features =
+            Features::fetch_config(&self.data_store).expect("expect features to exist in genesis");
         let use_fa_balance = features.is_enabled(FeatureFlag::NEW_ACCOUNTS_DEFAULT_TO_FA_APT_STORE);
         let use_concurrent_balance =
             features.is_enabled(FeatureFlag::DEFAULT_TO_CONCURRENT_FUNGIBLE_BALANCE);
 
-        // provision the account with no balance
-        let data = AccountData::with_account(account, 0, 0, use_fa_balance, use_concurrent_balance);
+        // provision the account first
+        let data =
+            AccountData::with_account(account, balance, 0, use_fa_balance, use_concurrent_balance);
         self.data_store.add_account_data(&data);
+
+        // fund it with new balance
+        if let Some(funded_amount) = data.coin_balance() {
+            if use_fa_balance {
+                assert_eq!(funded_amount, 0);
+            } else {
+                assert_eq!(funded_amount, balance);
+            }
+
+            // fund on the coin side (if needed)
+            if funded_amount != 0 {
+                let coin_info_resource: CoinInfoResource<AptosCoinType> = self
+                    .load_resource(AptosCoinType::coin_info_address())
+                    .expect("coin info resource must exist for APT");
+                let old_supply: u128 = self
+                    .load_value(coin_info_resource.supply_aggregator_state_key())
+                    .expect("supply value should exist for APT");
+                self.data_store.add_write_set(
+                    &coin_info_resource
+                        .to_writeset(old_supply + funded_amount as u128)
+                        .expect("valid write-set for coin info update"),
+                );
+            }
+        }
+
+        if let Some(funded_amount) = data.fungible_balance() {
+            if use_fa_balance {
+                assert_eq!(funded_amount, balance);
+            } else {
+                assert_eq!(funded_amount, 0);
+            }
+
+            // fund on the fa side (if needed)
+            if funded_amount != 0 {
+                // this affects how we fund the account
+                assert!(use_concurrent_balance);
+
+                // need to update the total supply
+                let mut resource_group: ObjectGroupResource = self
+                    .load_resource_group(AccountAddress::TEN)
+                    .expect("resource group must exist in data store");
+
+                let mut supply_resource: ConcurrentSupplyResource =
+                    Self::load_resource_from_object_group(&resource_group)
+                        .expect("concurrent supply exists");
+
+                let new_supply = *supply_resource.current.get() + funded_amount as u128;
+                supply_resource.current.set(new_supply);
+
+                Self::store_resource_into_object_group(&mut resource_group, &supply_resource);
+                self.store_resource_group(AccountAddress::TEN, &resource_group);
+            }
+        }
+
+        // log a message
+        log::debug!(
+            "account {} created with initial balance {balance}",
+            data.address()
+        );
     }
 
-    /// Retrieve a resource from data store in raw bytes
-    fn read_raw_resource_bytes(
-        &self,
-        addr: AccountAddress,
-        struct_tag: StructTag,
-    ) -> Option<Vec<u8>> {
-        let value = TStateView::get_state_value(
-            &self.data_store,
-            &StateKey::resource(&addr, &struct_tag).expect("valid struct tag only"),
-        )
-        .expect("in-memory data store is not expected to fail");
+    /// Retrieve a value from data store and deserialize it
+    fn load_value<T: DeserializeOwned>(&self, key: StateKey) -> Option<T> {
+        let value = TStateView::get_state_value(&self.data_store, &key)
+            .expect("in-memory data store is not expected to fail")?;
 
-        // convert value to bytes
-        value.map(|v| v.into_bytes().to_vec())
-    }
-
-    /// Retrieve a resource from data store in raw bytes
-    fn read_typed_resource<T: MoveStructType + DeserializeOwned>(
-        &self,
-        addr: AccountAddress,
-    ) -> Option<T> {
-        let bytes = self.read_raw_resource_bytes(addr, T::struct_tag())?;
-        let deserialized = bcs::from_bytes(&bytes)
-            .expect("serialization expected to succeed (Rust type incompatible with Move type?)");
+        let deserialized = bcs::from_bytes(value.bytes())
+            .expect("deserialization expected to succeed (Rust type incompatible with Move type?)");
         Some(deserialized)
+    }
+
+    /// Retrieve a resource from data store and deserialize it
+    fn load_resource<T: MoveResource>(&self, addr: AccountAddress) -> Option<T> {
+        self.load_value(StateKey::resource(&addr, &T::struct_tag()).expect("valid struct tag only"))
+    }
+
+    /// Retrieve a resource group from data store and deserialize it
+    fn load_resource_group<T: MoveResource>(&self, addr: AccountAddress) -> Option<T> {
+        self.load_value(StateKey::resource_group(&addr, &T::struct_tag()))
+    }
+
+    /// Store a resource group into data store after serializing it
+    fn store_resource_group<T: MoveResource + Serialize>(
+        &mut self,
+        addr: AccountAddress,
+        group: &T,
+    ) {
+        let write_set = WriteSetMut::new(vec![(
+            StateKey::resource_group(
+                &addr,
+                &T::struct_tag(),
+            ),
+            WriteOp::legacy_modification(
+                bcs::to_bytes(group).expect("serialization expected to succeed (Rust type incompatible with Move type?)").into(),
+            )
+        )]).freeze().expect("valid write-set");
+        self.data_store.add_write_set(&write_set);
+    }
+
+    /// Retrieve a resource from an object group resource and deserialize it
+    fn load_resource_from_object_group<T: MoveResource>(group: &ObjectGroupResource) -> Option<T> {
+        let bytes = group.group.get(&T::struct_tag())?;
+        let deserialized = bcs::from_bytes(bytes)
+            .expect("deserialization expected to succeed (Rust type incompatible with Move type?)");
+        Some(deserialized)
+    }
+
+    /// Store a resource into an object group resource after serializing it
+    fn store_resource_into_object_group<T: MoveResource + Serialize>(
+        group: &mut ObjectGroupResource,
+        resource: &T,
+    ) {
+        let bytes = bcs::to_bytes(resource)
+            .expect("serialization expected to succeed (Rust type incompatible with Move type?)");
+        group.group.insert(T::struct_tag(), bytes);
     }
 
     /// Retrieve the account sequence number
     fn get_account_sequence_number(&self, account: &Account) -> u64 {
         let resource: AccountResource = self
-            .read_typed_resource(*account.address())
+            .load_resource(*account.address())
             .expect("provisioned account should have a sequence number");
         resource.sequence_number()
     }
 
-    /// Execute a transaction
-    fn execute_transaction(&mut self, sender: AccountAddress, payload: TransactionPayload) {
+    /// Execute a transaction without committing its output
+    fn execute_transaction(
+        &mut self,
+        sender: AccountAddress,
+        payload: TransactionPayload,
+    ) -> Result<(VMStatus, TransactionOutput)> {
         // retrieve sender account from the address
         let account = self
             .address_registry
@@ -201,31 +305,72 @@ impl TracingExecutor {
         let code_storage = self.data_store.as_aptos_code_storage(env.clone());
         let log_context = AdapterLogSchema::new(self.data_store.id(), 0);
 
-        let x = vm.execute_user_transaction_with_custom_gas_meter(
+        let vm_result = vm.execute_user_transaction_with_custom_gas_meter(
             &resolver,
             &code_storage,
             &signed_txn,
             &log_context,
-            |gas_feature_version, _, _, is_approved_gov_script, meter_balance| {
-                make_prod_gas_meter(
+            |gas_feature_version, vm_gas_params, _, is_approved_gov_script, meter_balance| {
+                StandardGasMeter::new(StandardGasAlgebra::new(
                     gas_feature_version,
-                    VMGasParameters::zeros(),
+                    VMGasParameters {
+                        misc: MiscGasParameters::zeros(),
+                        instr: InstructionGasParameters::zeros(),
+                        txn: vm_gas_params.txn,
+                    },
                     StorageGasParameters::unlimited(),
                     is_approved_gov_script,
                     meter_balance,
-                )
+                ))
             },
         );
-        match x {
-            Ok((status, output, _)) => {
-                log::info!("on success: {status:?}, {output:?}");
+        match vm_result {
+            Ok((status, output, _gas_meter)) => {
+                match output.try_materialize_into_transaction_output(&resolver) {
+                    Ok(txn_output) => Ok((status, txn_output)),
+                    Err(error_status) => {
+                        bail!("AptosVM failed unexpectedly with status: {error_status}")
+                    },
+                }
             },
-            Err(status) => {
-                log::info!("on failure: {status:?}");
+            Err(error_status) => {
+                bail!("AptosVM failed unexpectedly with status: {error_status}");
             },
         }
+    }
 
-        // TODO: set gas
+    /// Execute a transaction with output (if any) committed
+    fn execute_transaction_and_commit_output(
+        &mut self,
+        sender: AccountAddress,
+        payload: TransactionPayload,
+    ) -> Result<TransactionStatus> {
+        let (_vm_status, output) = self.execute_transaction(sender, payload)?;
+        let (write_set, events, _gas_used, txn_status, _txn_misc) = output.unpack();
+        match txn_status {
+            TransactionStatus::Keep(_) => {
+                self.data_store.add_write_set(&write_set);
+                self.event_store.extend(events);
+            },
+            TransactionStatus::Discard(_) => {},
+            TransactionStatus::Retry => {
+                bail!("unexpected retry status for transaction execution");
+            },
+        }
+        Ok(txn_status)
+    }
+
+    /// Execute a transaction with output (if any) committed, expect a success
+    fn execute_transaction_and_commit_output_expect_success(
+        &mut self,
+        sender: AccountAddress,
+        payload: TransactionPayload,
+    ) -> Result<()> {
+        let status = self.execute_transaction_and_commit_output(sender, payload)?;
+        match status {
+            TransactionStatus::Keep(ExecutionStatus::Success) => Ok(()),
+            _ => bail!("transaction failed unexpectedly with status: {:?}", status),
+        }
     }
 
     /// Provision a framework package (should already be included in genesis)
@@ -244,7 +389,7 @@ impl TracingExecutor {
                 NamedAddressKind::Reserved,
             )?;
             if let Some(account) = new_account {
-                self.create_account(account);
+                self.create_account(account, INITIAL_APT_BALANCE);
             }
         }
 
@@ -272,7 +417,7 @@ impl TracingExecutor {
                 self.address_registry
                     .sync_named_address(name, addr, None, address_kind)?;
             if let Some(account) = new_account {
-                self.create_account(account);
+                self.create_account(account, INITIAL_APT_BALANCE);
             }
         }
 
@@ -320,9 +465,8 @@ impl TracingExecutor {
         );
 
         // execute the transaction
-        self.execute_transaction(sender_addr, payload);
-        // TODO: not done yet
-        log::info!("publishing package {}", built_package.name(),);
+        self.execute_transaction_and_commit_output_expect_success(sender_addr, payload)?;
+        log::debug!("package published: {}", built_package.name());
 
         // done
         Ok(())
