@@ -11,7 +11,6 @@ mod utils;
 pub use crate::common::LanguageSetting;
 use crate::{
     common::{PkgDeclaration, PkgDefinition, Project},
-    fuzz::executor::TracingExecutor,
     simulator::Simulator,
     testnet::{execute_runbook, provision_simulator},
 };
@@ -264,14 +263,8 @@ fn cmd_fuzz(project: Project, pkg_filter: FilterPackage) -> Result<()> {
         pkg_defs.push(pkg_def);
     }
 
-    // initialize the tracing executor
-    let mut executor = TracingExecutor::new();
-    executor.provision(&pkg_defs)?;
-
-    // TODO: fuzzing logic
-
-    // done
-    Ok(())
+    // done with preparation, now call the fuzzer
+    fuzz::run_on(pkg_defs)
 }
 
 /// Entrypoint on multi-package auditing
