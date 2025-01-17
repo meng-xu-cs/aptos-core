@@ -6,7 +6,10 @@ use anyhow::{bail, Result};
 use aptos_cached_packages::aptos_stdlib;
 use aptos_framework::{BuiltPackage, UPGRADE_POLICY_CUSTOM_FIELD};
 use aptos_gas_meter::{StandardGasAlgebra, StandardGasMeter};
-use aptos_gas_schedule::{InstructionGasParameters, MiscGasParameters, VMGasParameters};
+use aptos_gas_schedule::{
+    AptosGasParameters, FromOnChainGasSchedule, InstructionGasParameters, MiscGasParameters,
+    ToOnChainGasSchedule, VMGasParameters,
+};
 use aptos_language_e2e_tests::{
     account::{Account, AccountData},
     data_store::{FakeDataStore, GENESIS_CHANGE_SET_HEAD},
@@ -17,8 +20,8 @@ use aptos_types::{
     },
     chain_id::ChainId,
     contract_event::ContractEvent,
-    on_chain_config::{FeatureFlag, Features, OnChainConfig},
-    state_store::{state_key::StateKey, TStateView},
+    on_chain_config::{FeatureFlag, Features, GasScheduleV2, OnChainConfig},
+    state_store::{state_key::StateKey, state_value::StateValue, TStateView},
     transaction::{ExecutionStatus, TransactionOutput, TransactionPayload, TransactionStatus},
     write_set::{WriteOp, WriteSetMut},
     AptosCoinType, CoinType,
@@ -27,13 +30,11 @@ use aptos_vm::{data_cache::AsMoveResolver, AptosVM};
 use aptos_vm_environment::environment::AptosEnvironment;
 use aptos_vm_logging::log_schema::AdapterLogSchema;
 use aptos_vm_types::{
-    module_and_script_storage::AsAptosCodeStorage, output::VMOutput, storage::StorageGasParameters,
+    module_and_script_storage::AsAptosCodeStorage, storage::StorageGasParameters,
 };
 use move_compiler::compiled_unit::CompiledUnit;
 use move_core_types::{
-    account_address::AccountAddress,
-    move_resource::MoveResource,
-    vm_status::{DiscardedVMStatus, VMStatus},
+    account_address::AccountAddress, move_resource::MoveResource, vm_status::VMStatus,
 };
 use move_package::{
     compilation::compiled_package::CompiledUnitWithSource,
@@ -46,6 +47,9 @@ use std::collections::BTreeSet;
 
 /// Default APT fund per each new account (10M, with 8 decimals)
 const INITIAL_APT_BALANCE: u64 = 1_000_000_000_000_000;
+
+/// Max transaction size in bytes (1MB)
+const MAX_TRANSACTION_SIZE_IN_BYTES: u64 = 1024 * 1024;
 
 /// A utility struct for providing the `PackageHooks` implementation
 struct AptosPackageHooks;
@@ -73,20 +77,6 @@ enum GasProfile {
 }
 
 impl GasProfile {
-    pub fn new_constant(data_store: &FakeDataStore) -> Self {
-        let env = AptosEnvironment::new(data_store);
-        let params = &env
-            .gas_params()
-            .as_ref()
-            .unwrap_or_else(|why| panic!("gas profile does not exist in genesis: {why}"))
-            .vm
-            .txn;
-        Self::Constant {
-            price_per_gas_unit: params.min_price_per_gas_unit.into(),
-            max_gas_units_per_txn: params.maximum_number_of_gas_units.into(),
-        }
-    }
-
     /// Return gas information needed for transaction
     pub fn get_config_for_txn(&self) -> (u64, u64) {
         match self {
@@ -122,8 +112,34 @@ impl TracingExecutor {
         data_store.set_chain_id(ChainId::test());
         data_store.add_write_set(GENESIS_CHANGE_SET_HEAD.write_set());
 
+        // acquire gas config
+        let mut gas_schedule = GasScheduleV2::fetch_config(&data_store)
+            .expect("expect genesis to have a gas schedule");
+        let mut gas_params = AptosGasParameters::from_on_chain_gas_schedule(
+            &gas_schedule.entries.into_iter().collect(),
+            gas_schedule.feature_version,
+        )
+        .unwrap_or_else(|why| panic!("malformed gas schedule: {why}"));
+
+        // actual gas config tweaks
+        gas_params.vm.txn.max_transaction_size_in_bytes = MAX_TRANSACTION_SIZE_IN_BYTES.into();
+
+        // update gas config back into storage
+        gas_schedule.entries = gas_params.to_on_chain_gas_schedule(gas_schedule.feature_version);
+        data_store.set(
+            StateKey::on_chain_config::<GasScheduleV2>()
+                .expect("expect a valid resource tag for gas schedule"),
+            StateValue::from(
+                bcs::to_bytes(&gas_schedule)
+                    .expect("expect serialization of gas schedule resource to succeed"),
+            ),
+        );
+
         // derive the gas profile
-        let gas_profile = GasProfile::new_constant(&data_store);
+        let gas_profile = GasProfile::Constant {
+            price_per_gas_unit: gas_params.vm.txn.min_price_per_gas_unit.into(),
+            max_gas_units_per_txn: gas_params.vm.txn.maximum_number_of_gas_units.into(),
+        };
 
         // pack them
         Self {
