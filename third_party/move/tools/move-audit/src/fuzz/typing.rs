@@ -1,19 +1,11 @@
-use crate::fuzz::ident::{DatatypeIdent, ModuleIdent};
-use move_binary_format::{access::ModuleAccess, file_format::AbilitySet, CompiledModule};
+use crate::fuzz::ident::DatatypeIdent;
+use move_binary_format::{
+    access::ModuleAccess,
+    file_format::{AbilitySet, SignatureToken},
+    CompiledModule,
+};
 use move_core_types::account_address::AccountAddress;
 use std::collections::BTreeMap;
-
-/// The context in which `TypeTag` and `TypeRef` is defined
-pub trait TypingContext {
-    fn type_params(&self) -> &[AbilitySet];
-}
-
-/// A type parameter within a context
-#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
-pub struct TypeParam<'a, T: TypingContext> {
-    context: &'a T,
-    index: usize,
-}
 
 /// Variants of vector implementation
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
@@ -36,7 +28,7 @@ pub enum MapVariant {
 
 /// A concrete type instance within a typing context
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
-pub enum TypeTag<'a, T: TypingContext> {
+pub enum TypeTag {
     Bool,
     U8,
     U16,
@@ -57,24 +49,23 @@ pub enum TypeTag<'a, T: TypingContext> {
         value: Box<Self>,
         variant: MapVariant,
     },
-    Datatype(DatatypeInst<'a, T>),
-    Param(TypeParam<'a, T>),
+    Datatype(DatatypeInst),
+    Param(usize),
 }
 
 /// A type that can appear in function declarations
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
-pub enum TypeRef<'a, T: TypingContext> {
-    Owned(TypeTag<'a, T>),
-    ImmRef(TypeTag<'a, T>),
-    MutRef(TypeTag<'a, T>),
+pub enum TypeRef {
+    Owned(TypeTag),
+    ImmRef(TypeTag),
+    MutRef(TypeTag),
 }
 
 /// Instantiation of a datatype
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
-pub struct DatatypeInst<'a, T: TypingContext> {
+pub struct DatatypeInst {
     ident: DatatypeIdent,
-    context: &'a T,
-    type_args: Vec<TypeTag<'a, T>>,
+    type_args: Vec<TypeTag>,
 }
 
 /// Intrinsic datatypes known and specially handled
@@ -87,10 +78,10 @@ pub enum IntrinsicType {
 
 impl IntrinsicType {
     pub fn try_parse_ident(ident: &DatatypeIdent) -> Option<Self> {
-        if ident.module.address != AccountAddress::ONE {
+        if ident.address() != AccountAddress::ONE {
             return None;
         }
-        let parsed = match (ident.module.name.as_str(), ident.datatype.as_str()) {
+        let parsed = match (ident.module_name(), ident.datatype_name()) {
             ("bit_vector", "BitVector") => IntrinsicType::Bitvec,
             ("string", "String") => IntrinsicType::String,
             ("big_vector", "BigVector") => IntrinsicType::Vector(VectorVariant::BigVector),
@@ -112,8 +103,8 @@ impl IntrinsicType {
 /// Declaration of a datatype
 pub struct DatatypeDecl {
     ident: DatatypeIdent,
+    generics: Vec<AbilitySet>,
     abilities: AbilitySet,
-    type_params: Vec<AbilitySet>,
 }
 
 /// A registry of datatypes
@@ -131,36 +122,152 @@ impl DatatypeRegistry {
 
     /// Analyze a module and register datatypes found in this module
     pub fn analyze(&mut self, module: &CompiledModule) {
-        let module_ident = ModuleIdent {
-            address: *module.address(),
-            name: module.name().to_owned(),
-        };
-
         // go over all structs defined
-        for struct_def in &module.struct_defs {
-            let struct_handle = module.struct_handle_at(struct_def.struct_handle);
-            let datatype_ident = DatatypeIdent {
-                module: module_ident.clone(),
-                datatype: module.identifier_at(struct_handle.name).to_owned(),
-            };
+        for def in &module.struct_defs {
+            let handle = module.struct_handle_at(def.struct_handle);
+            let ident = DatatypeIdent::from_struct_handle(module, handle);
 
             // skip intrinsic types
-            if IntrinsicType::try_parse_ident(&datatype_ident).is_some() {
+            if IntrinsicType::try_parse_ident(&ident).is_some() {
                 continue;
             }
 
             // add the declaration
             let decl = DatatypeDecl {
-                ident: datatype_ident.clone(),
-                abilities: struct_handle.abilities,
-                type_params: struct_handle
+                ident: ident.clone(),
+                generics: handle
                     .type_parameters
                     .iter()
                     .map(|p| p.constraints)
                     .collect(),
+                abilities: handle.abilities,
             };
-            let existing = self.decls.insert(datatype_ident, decl);
+            let existing = self.decls.insert(ident, decl);
             assert!(existing.is_none());
+        }
+    }
+
+    /// Convert a signature token
+    pub fn convert_signature_token(
+        &self,
+        module: &CompiledModule,
+        token: &SignatureToken,
+    ) -> TypeRef {
+        match token {
+            SignatureToken::Bool => TypeRef::Owned(TypeTag::Bool),
+            SignatureToken::U8 => TypeRef::Owned(TypeTag::U8),
+            SignatureToken::U16 => TypeRef::Owned(TypeTag::U16),
+            SignatureToken::U32 => TypeRef::Owned(TypeTag::U32),
+            SignatureToken::U64 => TypeRef::Owned(TypeTag::U64),
+            SignatureToken::U128 => TypeRef::Owned(TypeTag::U128),
+            SignatureToken::U256 => TypeRef::Owned(TypeTag::U128),
+            SignatureToken::Address => TypeRef::Owned(TypeTag::Address),
+            SignatureToken::Signer => TypeRef::Owned(TypeTag::Signer),
+            SignatureToken::Vector(element) => {
+                let element_tag = match self.convert_signature_token(module, element) {
+                    TypeRef::Owned(tag) => tag,
+                    TypeRef::ImmRef(_) | TypeRef::MutRef(_) => {
+                        panic!("reference type as vector element is not expected");
+                    },
+                };
+                TypeRef::Owned(TypeTag::Vector {
+                    element: element_tag.into(),
+                    variant: VectorVariant::Vector,
+                })
+            },
+            SignatureToken::Struct(idx) => {
+                let handle = module.struct_handle_at(*idx);
+                let ident = DatatypeIdent::from_struct_handle(module, handle);
+
+                // first try to see if this is an intrinsic type
+                match IntrinsicType::try_parse_ident(&ident) {
+                    Some(IntrinsicType::Bitvec) => TypeRef::Owned(TypeTag::Bitvec),
+                    Some(IntrinsicType::String) => TypeRef::Owned(TypeTag::String),
+                    Some(IntrinsicType::Vector(_)) | Some(IntrinsicType::Map(_)) => {
+                        panic!("parameterized intrinsic type is not expected to be `SignatureToken::Struct`");
+                    },
+                    None => {
+                        // not an intrinsic type, locate the datatype
+                        let decl = self
+                            .decls
+                            .get(&ident)
+                            .unwrap_or_else(|| panic!("unregistered datatype {ident}"));
+                        assert!(decl.generics.is_empty());
+                        TypeRef::Owned(TypeTag::Datatype(DatatypeInst {
+                            ident,
+                            type_args: vec![],
+                        }))
+                    },
+                }
+            },
+            SignatureToken::StructInstantiation(idx, inst) => {
+                let handle = module.struct_handle_at(*idx);
+                let ident = DatatypeIdent::from_struct_handle(module, handle);
+
+                // convert the type arguments
+                let mut ty_args: Vec<_> = inst
+                    .iter()
+                    .map(|t| match self.convert_signature_token(module, t) {
+                        TypeRef::Owned(tag) => tag,
+                        TypeRef::ImmRef(_) | TypeRef::MutRef(_) => {
+                            panic!("reference type as datatype instantiation is not expected");
+                        },
+                    })
+                    .collect();
+
+                // first try to see if this is an intrinsic type
+                match IntrinsicType::try_parse_ident(&ident) {
+                    Some(IntrinsicType::Bitvec) | Some(IntrinsicType::String) => {
+                        panic!("basic intrinsic type is not expected to be `SignatureToken::StructInstantiation`");
+                    },
+                    Some(IntrinsicType::Vector(variant)) => {
+                        assert_eq!(ty_args.len(), 1);
+                        TypeRef::Owned(TypeTag::Vector {
+                            element: ty_args.pop().unwrap().into(),
+                            variant,
+                        })
+                    },
+                    Some(IntrinsicType::Map(variant)) => {
+                        assert_eq!(ty_args.len(), 2);
+                        TypeRef::Owned(TypeTag::Map {
+                            key: ty_args.pop().unwrap().into(),
+                            value: ty_args.pop().unwrap().into(),
+                            variant,
+                        })
+                    },
+                    None => {
+                        // not an intrinsic type, locate the datatype
+                        let decl = self
+                            .decls
+                            .get(&ident)
+                            .unwrap_or_else(|| panic!("unregistered datatype {ident}"));
+                        assert_eq!(decl.generics.len(), ty_args.len());
+                        TypeRef::Owned(TypeTag::Datatype(DatatypeInst {
+                            ident,
+                            type_args: ty_args,
+                        }))
+                    },
+                }
+            },
+            SignatureToken::Reference(inner) => {
+                let inner_tag = match self.convert_signature_token(module, inner) {
+                    TypeRef::Owned(tag) => tag,
+                    TypeRef::ImmRef(_) | TypeRef::MutRef(_) => {
+                        panic!("reference type behind immutable borrow is not expected");
+                    },
+                };
+                TypeRef::ImmRef(inner_tag)
+            },
+            SignatureToken::MutableReference(inner) => {
+                let inner_tag = match self.convert_signature_token(module, inner) {
+                    TypeRef::Owned(tag) => tag,
+                    TypeRef::ImmRef(_) | TypeRef::MutRef(_) => {
+                        panic!("reference type behind mutable borrow is not expected");
+                    },
+                };
+                TypeRef::MutRef(inner_tag)
+            },
+            SignatureToken::TypeParameter(idx) => TypeRef::Owned(TypeTag::Param(*idx as usize)),
         }
     }
 }
