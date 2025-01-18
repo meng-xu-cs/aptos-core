@@ -15,6 +15,7 @@ pub struct FunctionDecl {
     generics: Vec<AbilitySet>,
     parameters: Vec<TypeRef>,
     return_val: Vec<TypeRef>,
+    is_primary: bool,
 }
 
 pub struct FunctionRegistry {
@@ -30,7 +31,12 @@ impl FunctionRegistry {
     }
 
     /// Analyze a module and register public functions found in this module
-    pub fn analyze(&mut self, typing: &DatatypeRegistry, module: &CompiledModule) {
+    pub fn analyze(
+        &mut self,
+        typing: &DatatypeRegistry,
+        module: &CompiledModule,
+        is_primary: bool,
+    ) {
         // go over all functions defined
         for def in &module.function_defs {
             // we only care about public functions
@@ -61,6 +67,7 @@ impl FunctionRegistry {
                 generics: handle.type_parameters.clone(),
                 parameters,
                 return_val,
+                is_primary,
             };
             let existing = self.decls.insert(ident, decl);
             assert!(existing.is_none());

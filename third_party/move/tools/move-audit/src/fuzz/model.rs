@@ -41,6 +41,7 @@ impl Model {
 
         // initialize the function registry
         for pkg in pkgs {
+            let is_primary = matches!(pkg, PkgDefinition::Primary(_));
             for CompiledUnitWithSource {
                 unit,
                 source_path: _,
@@ -53,7 +54,7 @@ impl Model {
 
                 // go over all datatypes defined
                 self.function_registry
-                    .analyze(&self.datatype_registry, module);
+                    .analyze(&self.datatype_registry, module, is_primary);
             }
         }
     }
