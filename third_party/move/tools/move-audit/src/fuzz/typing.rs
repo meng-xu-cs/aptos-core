@@ -103,8 +103,8 @@ impl IntrinsicType {
 /// Declaration of a datatype
 pub struct DatatypeDecl {
     ident: DatatypeIdent,
-    generics: Vec<AbilitySet>,
-    abilities: AbilitySet,
+    pub generics: Vec<AbilitySet>,
+    pub abilities: AbilitySet,
 }
 
 /// A registry of datatypes

@@ -1,28 +1,23 @@
 use crate::{
     common::PkgDefinition,
-    fuzz::{entrypoint::FunctionRegistry, typing::DatatypeRegistry},
+    fuzz::{driver::DriverGenerator, entrypoint::FunctionRegistry, typing::DatatypeRegistry},
 };
 use move_compiler::compiled_unit::CompiledUnit;
 use move_package::compilation::compiled_package::CompiledUnitWithSource;
 
 /// A database that holds information we can statically get from the packages
-pub struct Model {
-    datatype_registry: DatatypeRegistry,
-    function_registry: FunctionRegistry,
-}
+pub struct Model {}
 
 impl Model {
     /// Initialize the model to an empty state
     pub fn new() -> Self {
-        Self {
-            datatype_registry: DatatypeRegistry::new(),
-            function_registry: FunctionRegistry::new(),
-        }
+        Self {}
     }
 
     /// Analyze a closure of packages
     pub fn provision(&mut self, pkgs: &[PkgDefinition]) {
         // initialize the datatype registry
+        let mut datatype_registry = DatatypeRegistry::new();
         for pkg in pkgs {
             for CompiledUnitWithSource {
                 unit,
@@ -35,11 +30,12 @@ impl Model {
                 };
 
                 // go over all datatypes defined
-                self.datatype_registry.analyze(module);
+                datatype_registry.analyze(module);
             }
         }
 
         // initialize the function registry
+        let mut function_registry = FunctionRegistry::new();
         for pkg in pkgs {
             let is_primary = matches!(pkg, PkgDefinition::Primary(_));
             for CompiledUnitWithSource {
@@ -53,9 +49,17 @@ impl Model {
                 };
 
                 // go over all datatypes defined
-                self.function_registry
-                    .analyze(&self.datatype_registry, module, is_primary);
+                function_registry.analyze(&datatype_registry, module, is_primary);
             }
+        }
+
+        // generate fuzzing drivers for each and every primary function
+        let mut generator = DriverGenerator::new(&datatype_registry, &function_registry);
+        for decl in function_registry.iter_decls() {
+            if !decl.is_primary {
+                continue;
+            }
+            generator.generate(decl);
         }
     }
 }
