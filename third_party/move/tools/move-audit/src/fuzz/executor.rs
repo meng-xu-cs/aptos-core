@@ -392,7 +392,7 @@ impl TracingExecutor {
     /// Provision a framework package (should already be included in genesis)
     fn provision_framework_package(&mut self, built_package: &BuiltPackage) -> Result<()> {
         // every named address in the framework package will be marked and
-        // should remain as a reserved address
+        // should remain as a framework address
         for (&name, &addr) in &built_package
             .package
             .compiled_package_info
@@ -401,8 +401,8 @@ impl TracingExecutor {
             let new_account = self.address_registry.sync_named_address(
                 name,
                 addr,
-                Some(NamedAddressKind::Reserved),
-                NamedAddressKind::Reserved,
+                Some(NamedAddressKind::Framework),
+                NamedAddressKind::Framework,
             )?;
             if let Some(account) = new_account {
                 self.create_account(account, INITIAL_APT_BALANCE);
