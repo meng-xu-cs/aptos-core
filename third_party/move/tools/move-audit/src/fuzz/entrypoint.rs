@@ -12,10 +12,17 @@ use std::collections::BTreeMap;
 /// Declaration of a function
 pub struct FunctionDecl {
     ident: FunctionIdent,
-    generics: Vec<AbilitySet>,
-    parameters: Vec<TypeRef>,
-    return_val: Vec<TypeRef>,
-    is_primary: bool,
+    pub generics: Vec<AbilitySet>,
+    pub parameters: Vec<TypeRef>,
+    pub return_sig: Vec<TypeRef>,
+    pub is_primary: bool,
+}
+
+impl FunctionDecl {
+    /// Get the identifier
+    pub fn ident(&self) -> &FunctionIdent {
+        &self.ident
+    }
 }
 
 pub struct FunctionRegistry {
@@ -54,7 +61,7 @@ impl FunctionRegistry {
                 .iter()
                 .map(|token| typing.convert_signature_token(module, token))
                 .collect();
-            let return_val = module
+            let return_sig = module
                 .signature_at(handle.return_)
                 .0
                 .iter()
@@ -66,11 +73,16 @@ impl FunctionRegistry {
                 ident: ident.clone(),
                 generics: handle.type_parameters.clone(),
                 parameters,
-                return_val,
+                return_sig,
                 is_primary,
             };
             let existing = self.decls.insert(ident, decl);
             assert!(existing.is_none());
         }
+    }
+
+    /// Return an iterator for all declarations collected
+    pub fn iter_decls(&self) -> impl Iterator<Item = &FunctionDecl> {
+        self.decls.values()
     }
 }
