@@ -2,6 +2,7 @@ use crate::common::PkgDefinition;
 use anyhow::Result;
 
 mod account;
+mod entrypoint;
 mod executor;
 mod ident;
 mod model;
