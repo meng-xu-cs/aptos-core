@@ -14,17 +14,20 @@ pub struct UserId(usize);
 /// Types of named address
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub enum NamedAddressKind {
-    Reserved,
-    Dependency,
+    /// first-party item
     Primary,
+    /// third-party item
+    Dependency,
+    /// Aptos framework
+    Framework,
 }
 
 impl Display for NamedAddressKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Reserved => write!(f, "Reserved"),
-            Self::Dependency => write!(f, "Dependency"),
             Self::Primary => write!(f, "Primary"),
+            Self::Dependency => write!(f, "Dependency"),
+            Self::Framework => write!(f, "Framework"),
         }
     }
 }
