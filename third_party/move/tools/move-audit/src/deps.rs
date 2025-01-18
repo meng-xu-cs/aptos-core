@@ -312,14 +312,6 @@ fn analyze_package_manifest(
             None => (),
             Some(manifest) => {
                 // confirm that it is a match
-                if dep_location.path() != manifest.path {
-                    bail!(
-                        "location mismatch of dependency {}: declared {}, analyzed {}",
-                        name,
-                        dep_location.path().to_string_lossy(),
-                        manifest.path.to_string_lossy()
-                    );
-                }
                 match optional_version.as_ref() {
                     None => (),
                     Some(v) => {
@@ -332,6 +324,25 @@ fn analyze_package_manifest(
                             );
                         }
                     },
+                }
+                if dep_location.path() != manifest.path {
+                    // HACK: special treatment for Aptos framework packages due
+                    // to the mirror repository: https://github.com/aptos-labs/aptos-framework
+                    if !matches!(
+                        name.as_str(),
+                        "MoveStdlib"
+                            | "AptosStdlib"
+                            | "AptosToken"
+                            | "AptosTokenObjects"
+                            | "AptosFramework"
+                    ) {
+                        bail!(
+                            "location mismatch of dependency {}: declared {}, analyzed {}",
+                            name,
+                            dep_location.path().to_string_lossy(),
+                            manifest.path.to_string_lossy()
+                        );
+                    }
                 }
 
                 // we have already analyzed this dependency
