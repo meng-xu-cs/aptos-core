@@ -270,6 +270,7 @@ fn cmd_fuzz(project: Project, pkg_filter: FilterPackage) -> Result<()> {
 /// Entrypoint on multi-package auditing
 pub fn run_on(
     path: PathBuf,
+    subdirs: Vec<PathBuf>,
     language: LanguageSetting,
     name_aliases: Vec<String>,
     in_place: bool,
@@ -290,6 +291,20 @@ pub fn run_on(
         })
         .init();
     info!("auditing project at path: {}", path.to_string_lossy());
+
+    // sanity check paths
+    if !path.exists() {
+        bail!("project path does not exist: {}", path.display());
+    }
+    for item in &subdirs {
+        let path_subdir = path.join(item);
+        if !path_subdir.exists() {
+            bail!(
+                "project subdirectory does not exist: {}",
+                path_subdir.display()
+            );
+        }
+    }
 
     // construct the named aliases
     let mut address_aliases: Vec<BTreeSet<String>> = vec![];
@@ -342,11 +357,15 @@ pub fn run_on(
         fs_extra::dir::copy(&path, dir.path(), &CopyOptions::new())?;
         Some(dir)
     };
-    let workdir = tempdir.as_ref().map_or(path.as_path(), |d| d.path());
+    let workdir = tempdir
+        .as_ref()
+        .map_or(path.as_path(), |d| d.path())
+        .canonicalize()?;
 
     // resolve the project
     let project = deps::resolve(
-        workdir,
+        &workdir,
+        subdirs.into_iter().map(|p| workdir.join(p)).collect(),
         language,
         address_aliases.into_iter().collect(),
         skip_deps_update,
