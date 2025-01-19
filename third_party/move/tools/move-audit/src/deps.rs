@@ -436,6 +436,7 @@ fn analyze_package_manifest(
 /// Resolve the dependency relation in the whole project
 pub fn resolve(
     path: &Path,
+    subdirs: BTreeSet<PathBuf>,
     language: LanguageSetting,
     address_aliases: BTreeSet<BTreeSet<String>>,
     skip_deps_update: bool,
@@ -457,7 +458,17 @@ pub fn resolve(
             {
                 continue;
             }
+
+            // obtain package path
             assert!(entry_path.pop());
+            let entry_path = entry_path.canonicalize()?;
+
+            // skip if this package is not in the subdir set
+            if !subdirs.is_empty() && !subdirs.contains(&entry_path) {
+                continue;
+            }
+
+            // mark this package as a primary package
             pkgs.push(entry_path);
         }
     }
