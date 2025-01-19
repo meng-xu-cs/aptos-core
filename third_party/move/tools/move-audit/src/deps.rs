@@ -8,7 +8,6 @@ use aptos_framework::{
     natives::code::{ModuleMetadata, MoveOption, PackageDep, PackageMetadata, UpgradePolicy},
     zip_metadata_str, UPGRADE_POLICY_CUSTOM_FIELD,
 };
-use log::{debug, info};
 use move_compiler::compiled_unit::CompiledUnit;
 use move_core_types::account_address::AccountAddress;
 use move_package::{
@@ -158,6 +157,13 @@ fn analyze_package_manifest(
         dev_dependencies,
     } = manifest;
 
+    // mark the start of analysis
+    log::debug!(
+        "{}+ package manifest analysis: {}",
+        "  ".repeat(stack.len()),
+        package.name,
+    );
+
     // check name match
     let pkg_name = package.name.to_string();
     match name_opt {
@@ -212,6 +218,11 @@ fn analyze_package_manifest(
             }
 
             // we have already analyzed this package
+            log::debug!(
+                "{}- package manifest analysis: {} (cached)",
+                "  ".repeat(stack.len()),
+                package.name,
+            );
             return Ok(pkg_name);
         },
     }
@@ -221,13 +232,6 @@ fn analyze_package_manifest(
         bail!("cyclic dependency on package {}", pkg_name);
     }
     stack.push(pkg_name);
-
-    // mark the start of analysis
-    debug!(
-        "analyzing manifest of package {} at {}",
-        package.name,
-        root.to_string_lossy()
-    );
 
     // collect named addresses
     let mut named_addresses = BTreeMap::new();
@@ -249,7 +253,7 @@ fn analyze_package_manifest(
             for (addr_name, addr_val) in decls {
                 match named_addresses.get_mut(addr_name.as_str()) {
                     None => bail!(
-                        "unrecognized dev assignment for named address {} in package {}",
+                        "unrecognized dev assignment for named address '{}' in package '{}'",
                         addr_name,
                         package.name
                     ),
@@ -258,7 +262,7 @@ fn analyze_package_manifest(
                             *existing = PkgNamedAddr::Devel(addr_val);
                         },
                         PkgNamedAddr::Devel(_) => unreachable!(
-                            "unexpected dev assignment for named address {} in package {}",
+                            "unexpected dev assignment for named address '{}' in package '{}'",
                             addr_name, package.name
                         ),
                         PkgNamedAddr::Fixed(fixed_addr) => {
@@ -269,8 +273,8 @@ fn analyze_package_manifest(
                             // different values.
                             if fixed_addr != &addr_val {
                                 log::warn!(
-                                    "dev assignment for named address {} is different from the \
-                                    fixed assignment in package {}: {fixed_addr} vs {addr_val}",
+                                    "dev assignment for named address '{}' is different from \
+                                    the fixed assignment in package '{}'",
                                     addr_name,
                                     package.name
                                 );
@@ -419,6 +423,13 @@ fn analyze_package_manifest(
     if exists.is_some() {
         panic!("package {} is analyzed twice", package.name);
     }
+
+    // mark the end of the analysis
+    log::debug!(
+        "{}- package manifest analysis: {} (new)",
+        "  ".repeat(stack.len()),
+        package.name,
+    );
     Ok(pkg_name)
 }
 
@@ -467,7 +478,7 @@ pub fn resolve(
         assert!(stack.is_empty());
         primary_pkgs.insert(name);
     }
-    info!(
+    log::info!(
         "found {} package(s), out of which {} are primary",
         analyzed_pkgs.len(),
         primary_pkgs.len()
@@ -510,7 +521,7 @@ pub fn resolve(
             }
         }
     }
-    debug!(
+    log::debug!(
         "{} named addresses found and consolidated",
         consolidated.len()
     );
