@@ -182,6 +182,10 @@ pub struct AuditOptions {
     /// Path to the project directory
     path: PathBuf,
 
+    /// Subdirectories to be included in the analysis
+    #[clap(long)]
+    subdir: Vec<PathBuf>,
+
     /// Choose a language version
     #[clap(long, default_value = "2.1+")]
     language: move_audit::LanguageSetting,
@@ -216,6 +220,7 @@ impl CliCommand<&'static str> for AuditOptions {
     async fn execute(self) -> CliTypedResult<&'static str> {
         let Self {
             path,
+            subdir,
             language,
             alias,
             in_place,
@@ -225,6 +230,7 @@ impl CliCommand<&'static str> for AuditOptions {
         } = self;
         move_audit::run_on(
             path,
+            subdir,
             language,
             alias,
             in_place,
