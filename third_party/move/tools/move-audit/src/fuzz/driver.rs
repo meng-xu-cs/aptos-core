@@ -23,7 +23,8 @@ impl<'a> DriverGenerator<'a> {
 
     /// Generate drivers (which could be zero to multiple) for an entrypoint
     pub fn generate(&mut self, decl: &FunctionDecl) {
-        log::debug!("processing {}", decl.ident());
-        // TODO
+        log::debug!("generating driver for {}", decl.ident);
+
+        // check for potential instantiations
     }
 }

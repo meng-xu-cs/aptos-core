@@ -17,7 +17,7 @@ use crate::{
 use anyhow::{anyhow, bail, Result};
 use clap::{Parser, Subcommand};
 use fs_extra::dir::CopyOptions;
-use log::{info, LevelFilter};
+use log::LevelFilter;
 use move_model::metadata::LanguageVersion;
 use regex::Regex;
 use std::{
@@ -184,23 +184,23 @@ fn cmd_test(
         let manifest = pkg.as_manifest();
         match command.as_ref() {
             None => {
-                info!("running unit tests for package {}", manifest.name);
+                log::info!("running unit tests for package {}", manifest.name);
                 package::exec_unit_test(manifest, &named_accounts, language, None)?;
             },
             Some(PkgCommand::Filter { pattern }) => {
-                info!("running unit tests for package {}", manifest.name);
+                log::info!("running unit tests for package {}", manifest.name);
                 package::exec_unit_test(manifest, &named_accounts, language, Some(pattern))?;
             },
             Some(PkgCommand::Compile) => {
-                info!("compiling package {}", manifest.name);
+                log::info!("compiling package {}", manifest.name);
                 package::build(manifest, &named_accounts, language, true)?;
             },
             Some(PkgCommand::Format { config }) => {
-                info!("formatting package {}", manifest.name);
+                log::info!("formatting package {}", manifest.name);
                 package::format_code(manifest, config.as_deref())?;
             },
             Some(PkgCommand::Doc) => {
-                info!("generating documents for package {}", manifest.name);
+                log::info!("generating documents for package {}", manifest.name);
                 package::gen_docs(manifest, &named_accounts, language)?;
             },
         }
@@ -252,7 +252,7 @@ fn cmd_fuzz(project: Project, pkg_filter: FilterPackage) -> Result<()> {
     let mut pkg_defs = vec![];
     for pkg_decl in pkg_filter.apply(pkgs)? {
         let manifest = pkg_decl.as_manifest();
-        info!("compiling package {}", manifest.name);
+        log::debug!("compiling package {}", manifest.name);
         let pkg_built = package::build(manifest, &named_accounts, language, false)?;
 
         let pkg_def = match pkg_decl {
@@ -290,7 +290,7 @@ pub fn run_on(
             _ => LevelFilter::Trace,
         })
         .init();
-    info!("auditing project at path: {}", path.to_string_lossy());
+    log::info!("auditing project at path: {}", path.to_string_lossy());
 
     // sanity check paths
     if !path.exists() {

@@ -102,9 +102,17 @@ impl IntrinsicType {
 
 /// Declaration of a datatype
 pub struct DatatypeDecl {
-    ident: DatatypeIdent,
-    pub generics: Vec<AbilitySet>,
+    pub ident: DatatypeIdent,
+    pub generics: Vec<(AbilitySet, bool)>,
     pub abilities: AbilitySet,
+    is_primary: bool,
+}
+
+impl DatatypeDecl {
+    /// Check whether this datatype is defined in the primary target
+    pub fn is_primary(&self) -> bool {
+        self.is_primary
+    }
 }
 
 /// A registry of datatypes
@@ -121,7 +129,7 @@ impl DatatypeRegistry {
     }
 
     /// Analyze a module and register datatypes found in this module
-    pub fn analyze(&mut self, module: &CompiledModule) {
+    pub fn analyze(&mut self, module: &CompiledModule, is_primary: bool) {
         // go over all structs defined
         for def in &module.struct_defs {
             let handle = module.struct_handle_at(def.struct_handle);
@@ -138,9 +146,10 @@ impl DatatypeRegistry {
                 generics: handle
                     .type_parameters
                     .iter()
-                    .map(|p| p.constraints)
+                    .map(|p| (p.constraints, p.is_phantom))
                     .collect(),
                 abilities: handle.abilities,
+                is_primary,
             };
             let existing = self.decls.insert(ident, decl);
             assert!(existing.is_none());
@@ -269,5 +278,58 @@ impl DatatypeRegistry {
             },
             SignatureToken::TypeParameter(idx) => TypeRef::Owned(TypeTag::Param(*idx as usize)),
         }
+    }
+
+    /// Find all declarations that match the ability requirement
+    pub fn datatypes_by_ability_constraint(&self, constraint: AbilitySet) -> Vec<DatatypeIdent> {
+        for decl in self.decls.values() {
+            // short-circuit if the constraint is not met
+            if !constraint.is_subset(decl.abilities) {
+                continue;
+            }
+
+            // try to instantiate
+            todo!()
+        }
+        todo!()
+    }
+
+    /// Find all type tags that match the ability requirement
+    pub fn type_tags_by_ability_constraint(&self, constraint: AbilitySet) -> Vec<TypeTag> {
+        let mut result = vec![];
+        if constraint.is_subset(AbilitySet::PRIMITIVES) {
+            result.push(TypeTag::Bool);
+            result.push(TypeTag::U8);
+            result.push(TypeTag::U16);
+            result.push(TypeTag::U32);
+            result.push(TypeTag::U64);
+            result.push(TypeTag::U128);
+            result.push(TypeTag::U256);
+            result.push(TypeTag::Bitvec);
+            result.push(TypeTag::String);
+            result.push(TypeTag::Address);
+        }
+        if constraint.is_subset(AbilitySet::SIGNER) {
+            result.push(TypeTag::Signer);
+        }
+        result
+    }
+
+    /// Find all type refs that match the ability requirement
+    pub fn type_refs_by_ability_constraint(&self, constraint: AbilitySet) -> Vec<TypeRef> {
+        let mut result = self
+            .type_tags_by_ability_constraint(constraint)
+            .into_iter()
+            .map(TypeRef::Owned)
+            .collect();
+
+        if constraint.is_subset(AbilitySet::REFERENCES) {
+            let _ = self
+                .type_tags_by_ability_constraint(AbilitySet::EMPTY)
+                .into_iter()
+                .map(TypeRef::ImmRef);
+            todo!()
+        }
+        result
     }
 }

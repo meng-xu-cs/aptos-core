@@ -10942,6 +10942,7 @@ dependencies = [
  "env_logger",
  "fs_extra",
  "hex",
+ "itertools 0.13.0",
  "lazy_static",
  "log",
  "move-binary-format",

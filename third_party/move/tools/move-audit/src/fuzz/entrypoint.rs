@@ -11,17 +11,17 @@ use std::collections::BTreeMap;
 
 /// Declaration of a function
 pub struct FunctionDecl {
-    ident: FunctionIdent,
+    pub ident: FunctionIdent,
     pub generics: Vec<AbilitySet>,
     pub parameters: Vec<TypeRef>,
     pub return_sig: Vec<TypeRef>,
-    pub is_primary: bool,
+    is_primary: bool,
 }
 
 impl FunctionDecl {
-    /// Get the identifier
-    pub fn ident(&self) -> &FunctionIdent {
-        &self.ident
+    /// Check whether this function is defined in the primary target
+    pub fn is_primary(&self) -> bool {
+        self.is_primary
     }
 }
 
