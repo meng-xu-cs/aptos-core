@@ -160,7 +160,7 @@ impl DatatypeRegistry {
             SignatureToken::U32 => TypeRef::Owned(TypeTag::U32),
             SignatureToken::U64 => TypeRef::Owned(TypeTag::U64),
             SignatureToken::U128 => TypeRef::Owned(TypeTag::U128),
-            SignatureToken::U256 => TypeRef::Owned(TypeTag::U128),
+            SignatureToken::U256 => TypeRef::Owned(TypeTag::U256),
             SignatureToken::Address => TypeRef::Owned(TypeTag::Address),
             SignatureToken::Signer => TypeRef::Owned(TypeTag::Signer),
             SignatureToken::Vector(element) => {
