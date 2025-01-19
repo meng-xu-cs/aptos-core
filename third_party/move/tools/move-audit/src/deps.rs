@@ -261,11 +261,21 @@ fn analyze_package_manifest(
                             "unexpected dev assignment for named address {} in package {}",
                             addr_name, package.name
                         ),
-                        PkgNamedAddr::Fixed(_) => bail!(
-                            "dev assignment for named address {} with fixed value in package {}",
-                            addr_name,
-                            package.name
-                        ),
+                        PkgNamedAddr::Fixed(fixed_addr) => {
+                            // NOTE: it is weird to see a fixed address being
+                            // re-assigned in the dev-address part. It might be
+                            // okay if they are assigned the same value, and it
+                            // is definitely weird if they are assigned to
+                            // different values.
+                            if fixed_addr != &addr_val {
+                                log::warn!(
+                                    "dev assignment for named address {} is different from the \
+                                    fixed assignment in package {}: {fixed_addr} vs {addr_val}",
+                                    addr_name,
+                                    package.name
+                                );
+                            }
+                        },
                     },
                 }
             }
