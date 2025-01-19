@@ -19,6 +19,7 @@ impl Model {
         // initialize the datatype registry
         let mut datatype_registry = DatatypeRegistry::new();
         for pkg in pkgs {
+            let is_primary = matches!(pkg, PkgDefinition::Primary(_));
             for CompiledUnitWithSource {
                 unit,
                 source_path: _,
@@ -30,7 +31,7 @@ impl Model {
                 };
 
                 // go over all datatypes defined
-                datatype_registry.analyze(module);
+                datatype_registry.analyze(module, is_primary);
             }
         }
 
@@ -56,7 +57,7 @@ impl Model {
         // generate fuzzing drivers for each and every primary function
         let mut generator = DriverGenerator::new(&datatype_registry, &function_registry);
         for decl in function_registry.iter_decls() {
-            if !decl.is_primary {
+            if !decl.is_primary() {
                 continue;
             }
             generator.generate(decl);

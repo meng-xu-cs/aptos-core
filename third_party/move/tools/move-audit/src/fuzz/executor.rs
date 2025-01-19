@@ -419,6 +419,8 @@ impl TracingExecutor {
         address_kind: NamedAddressKind,
         built_package: &BuiltPackage,
     ) -> Result<()> {
+        log::debug!("provision package: {}", built_package.name());
+
         // collect addresses and create accounts
         for (&name, &addr) in &built_package
             .package
