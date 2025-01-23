@@ -2,7 +2,9 @@ use crate::deps::PkgManifest;
 use anyhow::{bail, Result};
 use aptos_crypto::{ed25519::Ed25519PrivateKey, PrivateKey};
 use aptos_framework::{extended_checks, BuiltPackage};
-use aptos_types::transaction::authenticator::AuthenticationKey;
+use aptos_types::{
+    account_address::create_resource_address, transaction::authenticator::AuthenticationKey,
+};
 use move_binary_format::{
     binary_views::BinaryIndexedView,
     file_format::{AbilitySet, SignatureToken},
@@ -17,6 +19,7 @@ use std::{collections::BTreeMap, process::Command, str::FromStr};
 pub enum Account {
     Ref(AccountAddress),
     Owned(Ed25519PrivateKey),
+    Resource(AccountAddress, String),
 }
 
 impl Account {
@@ -24,6 +27,7 @@ impl Account {
         match self {
             Self::Ref(addr) => *addr,
             Self::Owned(key) => AuthenticationKey::ed25519(&key.public_key()).account_address(),
+            Self::Resource(base, seed) => create_resource_address(*base, seed.as_bytes()),
         }
     }
 }

@@ -28,6 +28,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::{Display, Formatter},
     fs, io,
+    ops::Deref,
     path::{Path, PathBuf},
 };
 use walkdir::WalkDir;
@@ -439,6 +440,7 @@ pub fn resolve(
     subdirs: BTreeSet<PathBuf>,
     language: LanguageSetting,
     address_aliases: BTreeSet<BTreeSet<String>>,
+    resource_mapping: BTreeMap<String, (String, String)>,
     skip_deps_update: bool,
 ) -> Result<Project> {
     let base = path.canonicalize()?;
@@ -537,8 +539,26 @@ pub fn resolve(
         consolidated.len()
     );
 
-    // unpack the consolidation and assign random addresses for unset ones
-    let mut named_accounts: BTreeMap<_, Account> = BTreeMap::new();
+    // check named address used
+    for group in &address_aliases {
+        for item in group {
+            if !consolidated.contains_key(item) {
+                bail!("unknown named address in alias group: {item}");
+            }
+        }
+    }
+    for (resource, (base, _)) in &resource_mapping {
+        if !consolidated.contains_key(resource) {
+            bail!("unknown named address in resource mapping: {resource}");
+        }
+        if !consolidated.contains_key(base) {
+            bail!("unknown named address in resource mapping: {base}");
+        }
+    }
+
+    // unpack the consolidation and assign addresses for address groups
+    let mut address_assignments = BTreeMap::new();
+    let mut address_alias_group = BTreeMap::new();
     for (key, val) in consolidated {
         // check for alias (if exists)
         let mut alias = None;
@@ -546,34 +566,158 @@ pub fn resolve(
             if !group.contains(&key) {
                 continue;
             }
-            for item in group {
-                match named_accounts.get(item) {
-                    None => continue,
-                    Some(a) => {
-                        alias = Some(a.address());
-                        break;
-                    },
-                }
+            if alias.is_none() {
+                panic!("address {key} belongs to two alias groups, this is a bug");
             }
-            if alias.is_some() {
-                break;
+
+            // mark alias group first
+            let group_id = group
+                .iter()
+                .next()
+                .expect("at least one item in an alias group");
+            alias = Some(group_id.clone());
+
+            if group_id == &key {
+                // we are the first one in this group
+                let mut resource_assignment = None;
+                for member in group {
+                    match resource_mapping.get(member) {
+                        None => continue,
+                        Some((base, seed)) => {
+                            if resource_assignment.is_some() {
+                                bail!("alias group contains two resource account");
+                            }
+                            resource_assignment = Some((base.to_string(), seed.to_string()));
+                        },
+                    }
+                }
+                let existing =
+                    address_assignments.insert(key.clone(), (val.clone(), resource_assignment));
+                assert!(existing.is_none());
+                continue;
+            }
+
+            // now update the group address if needed
+            let (group_addr, _) = address_assignments
+                .get_mut(group_id)
+                .expect("alias group already created");
+
+            let should_update = match (group_addr.deref(), val) {
+                (PkgNamedAddr::Fixed(a1), PkgNamedAddr::Fixed(a2)) => {
+                    if a1 != &a2 {
+                        bail!("conflicting fixed address within an alias group: {key}");
+                    }
+                    false
+                },
+                (PkgNamedAddr::Fixed(a1), PkgNamedAddr::Devel(a2)) => {
+                    if a1 != &a2 {
+                        bail!("conflicting fixed and dev address within an alias group: {key}");
+                    }
+                    false
+                },
+                (PkgNamedAddr::Fixed(_), PkgNamedAddr::Unset) => false,
+
+                (PkgNamedAddr::Devel(a1), PkgNamedAddr::Fixed(a2)) => {
+                    if a1 != &a2 {
+                        bail!("conflicting dev and fixed address within an alias group: {key}");
+                    }
+                    true
+                },
+                (PkgNamedAddr::Devel(a1), PkgNamedAddr::Devel(a2)) => {
+                    if a1 != &a2 {
+                        bail!("conflicting dev address assignment within an alias group");
+                    }
+                    false
+                },
+                (PkgNamedAddr::Devel(_), PkgNamedAddr::Unset) => false,
+
+                (PkgNamedAddr::Unset, PkgNamedAddr::Fixed(_)) => true,
+                (PkgNamedAddr::Unset, PkgNamedAddr::Devel(_)) => true,
+                (PkgNamedAddr::Unset, PkgNamedAddr::Unset) => false,
+            };
+
+            // only update the assignment if we have more information
+            if should_update {
+                *group_addr = val;
             }
         }
 
-        // handle actual assignments
-        let account = match val {
-            PkgNamedAddr::Fixed(addr) => {
-                if matches!(alias, Some(a) if a != addr) {
-                    bail!("invalid alias declaration: {}", key);
-                }
-                Account::Ref(addr)
-            },
-            PkgNamedAddr::Devel(_) | PkgNamedAddr::Unset => match alias {
-                None => Account::Owned(Ed25519PrivateKey::generate(&mut OsRng)),
-                Some(a) => Account::Ref(a),
-            },
-        };
-        named_accounts.insert(key, account);
+        // if we are not on alias, just insert the pair
+        if alias.is_none() {
+            address_assignments.insert(key.clone(), (val, resource_mapping.get(&key).cloned()));
+        }
+
+        // add the alias information
+        address_alias_group.insert(key, alias);
+    }
+
+    // iteratively build up the account mapping
+    let mut named_accounts: BTreeMap<_, Account> = BTreeMap::new();
+    loop {
+        let mut updated = false;
+        let mut pending = false;
+        for (key, alias) in &address_alias_group {
+            if named_accounts.contains_key(key) {
+                continue;
+            }
+
+            // we will be updating the accounts for sure
+            pending = true;
+
+            // now try to assign an address to this account
+            match alias.as_ref() {
+                Some(name) if name != key => {
+                    let addr = match named_accounts.get(name) {
+                        // NOTE: it is possible to have a `None` here when
+                        // 1) this alias group is a resource account and
+                        // 2) that resource account has not been created yet.
+                        None => continue,
+                        Some(a) => a.address(),
+                    };
+
+                    named_accounts.insert(key.clone(), Account::Ref(addr));
+                    updated = true;
+                    continue;
+                },
+                _ => (),
+            }
+
+            // either as the first member in the group or as an individual address
+            let (named_addr, resource_assignment) = address_assignments.get(key).unwrap();
+            let account = match resource_assignment.as_ref() {
+                None => match named_addr {
+                    PkgNamedAddr::Fixed(addr) => Account::Ref(*addr),
+                    PkgNamedAddr::Devel(_) | PkgNamedAddr::Unset => {
+                        Account::Owned(Ed25519PrivateKey::generate(&mut OsRng))
+                    },
+                },
+                Some((base, seed)) => {
+                    if matches!(named_addr, PkgNamedAddr::Fixed(_) | PkgNamedAddr::Devel(_)) {
+                        bail!("a resource account cannot have fixed or devel assignment: {key}");
+                    }
+
+                    // check if we have seen the base assignment
+                    match named_accounts.get(base) {
+                        None => continue,
+                        Some(a) => Account::Resource(a.address(), seed.clone()),
+                    }
+                },
+            };
+
+            named_accounts.insert(key.clone(), account);
+            updated = true;
+        }
+
+        // get out of the loop when there is no pending assignment
+        if !pending {
+            break;
+        }
+
+        // by the end of the loop, if we see pending but no updates, we might
+        // run into mutually recursive resource accounts
+        if !updated {
+            bail!("deadlock in address assignments");
+        }
     }
 
     // additionally check that all aliases are assigned
