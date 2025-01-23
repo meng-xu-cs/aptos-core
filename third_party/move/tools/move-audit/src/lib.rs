@@ -21,7 +21,7 @@ use log::LevelFilter;
 use move_model::metadata::LanguageVersion;
 use regex::Regex;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 use tempfile::TempDir;
@@ -273,6 +273,7 @@ pub fn run_on(
     subdirs: Vec<PathBuf>,
     language: LanguageSetting,
     name_aliases: Vec<String>,
+    resource_accounts: Vec<String>,
     in_place: bool,
     skip_deps_update: bool,
     verbose: u8,
@@ -309,14 +310,9 @@ pub fn run_on(
     // construct the named aliases
     let mut address_aliases: Vec<BTreeSet<String>> = vec![];
     for item in name_aliases {
-        let mut iter = item.split('=');
-        let (lhs, rhs) = iter
-            .next()
-            .and_then(|lhs| iter.next().map(|rhs| (lhs, rhs)))
-            .ok_or_else(|| anyhow!("invalid alias declaration: {}", item))?;
-        if iter.next().is_some() {
-            bail!("invalid alias declaration: {}", item);
-        }
+        let (lhs, rhs) = split_on_char(&item, '=')
+            .ok_or_else(|| anyhow!("invalid alias declaration: {item}"))?;
+
         let lhs_pos = address_aliases.iter().position(|set| set.contains(lhs));
         let rhs_pos = address_aliases.iter().position(|set| set.contains(rhs));
 
@@ -349,6 +345,18 @@ pub fn run_on(
         }
     }
 
+    // mark resource accounts created from regular addresses
+    let mut resource_mapping = BTreeMap::new();
+    for item in resource_accounts {
+        let (resource, base, seed) = split_on_char(&item, '=')
+            .and_then(|(resource, rest)| {
+                split_on_char(rest, ':').map(|(base, seed)| (resource, base, seed))
+            })
+            .ok_or_else(|| anyhow!("invalid resource declaration: {item}"))?;
+
+        resource_mapping.insert(resource.to_string(), (base.to_string(), seed.to_string()));
+    }
+
     // copy over the workspace
     let tempdir = if in_place {
         None
@@ -368,6 +376,7 @@ pub fn run_on(
         subdirs.into_iter().map(|p| workdir.join(p)).collect(),
         language,
         address_aliases.into_iter().collect(),
+        resource_mapping,
         skip_deps_update,
     )?;
 
@@ -414,4 +423,15 @@ pub fn run_on(
 
     // done
     Ok(())
+}
+
+/// Utility: split on a given char
+fn split_on_char(s: &str, sep: char) -> Option<(&str, &str)> {
+    let mut iter = s.split(sep);
+    let p1 = iter.next()?;
+    let p2 = iter.next()?;
+    if iter.next().is_some() {
+        return None;
+    }
+    Some((p1, p2))
 }
