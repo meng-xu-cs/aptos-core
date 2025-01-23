@@ -194,6 +194,10 @@ pub struct AuditOptions {
     #[clap(long)]
     alias: Vec<String>,
 
+    /// Resource account declaration
+    #[clap(long)]
+    resource: Vec<String>,
+
     /// Execute in-place instead of copying over the directory to a tempdir
     #[clap(long)]
     in_place: bool,
@@ -223,6 +227,7 @@ impl CliCommand<&'static str> for AuditOptions {
             subdir,
             language,
             alias,
+            resource,
             in_place,
             skip_deps_update,
             verbose,
@@ -233,6 +238,7 @@ impl CliCommand<&'static str> for AuditOptions {
             subdir,
             language,
             alias,
+            resource,
             in_place,
             skip_deps_update,
             verbose,

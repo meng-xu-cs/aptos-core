@@ -57,6 +57,9 @@ pub fn provision_simulator(simulator: &mut Simulator, project: &Project) -> Resu
                 )?;
                 num_accounts += 1;
             },
+            Account::Resource(base, seed) => {
+                todo!("resource account is not supported yet {base}->{seed}");
+            },
         }
     }
 
