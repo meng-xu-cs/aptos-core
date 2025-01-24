@@ -6,7 +6,7 @@ use move_binary_format::{
     CompiledModule,
 };
 use move_core_types::account_address::AccountAddress;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt::Display};
 
 /// Variants of vector implementation
 #[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
@@ -28,6 +28,16 @@ impl VectorVariant {
         match self {
             Self::Vector => AbilitySet::EMPTY,
             Self::BigVector | Self::SmartVector => AbilitySet::EMPTY | Ability::Store,
+        }
+    }
+}
+
+impl Display for VectorVariant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Vector => write!(f, "vector"),
+            Self::BigVector => write!(f, "aptos_std::big_vector::BigVector"),
+            Self::SmartVector => write!(f, "aptos_std::smart_vector::SmartVector"),
         }
     }
 }
@@ -84,6 +94,19 @@ impl MapVariant {
     }
 }
 
+impl Display for MapVariant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Table => write!(f, "aptos_std::table::Table"),
+            Self::TableWithLength => write!(f, "aptos_std::table_with_length::TableWithLength"),
+            Self::SmartTable => write!(f, "aptos_std::smart_table::SmartTable"),
+            Self::SimpleMap => write!(f, "aptos_std::simple_map::SimpleMap"),
+            Self::OrderedMap => write!(f, "aptos_std::ordered_map::OrderedMap"),
+            Self::BigOrderedMap => write!(f, "aptos_std::big_ordered_map::BigOrderedMap"),
+        }
+    }
+}
+
 const MAP_VARIANTS: &[MapVariant] = &[
     MapVariant::Table,
     MapVariant::TableWithLength,
@@ -120,6 +143,32 @@ pub enum TypeTag {
     Param(usize),
 }
 
+impl Display for TypeTag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bool => write!(f, "bool"),
+            Self::U8 => write!(f, "u8"),
+            Self::U16 => write!(f, "u16"),
+            Self::U32 => write!(f, "u32"),
+            Self::U64 => write!(f, "u64"),
+            Self::U128 => write!(f, "u128"),
+            Self::U256 => write!(f, "u256"),
+            Self::Bitvec => write!(f, "std::bit_vector::BitVector"),
+            Self::String => write!(f, "std::string::String"),
+            Self::Address => write!(f, "address"),
+            Self::Signer => write!(f, "signer"),
+            Self::Vector { variant, element } => write!(f, "{variant}<{element}>"),
+            Self::Map {
+                variant,
+                key,
+                value,
+            } => write!(f, "{variant}<{key}, {value}>"),
+            Self::Datatype(inst) => write!(f, "{inst}"),
+            Self::Param(index) => write!(f, "#{index}"),
+        }
+    }
+}
+
 /// A type that can appear in function declarations
 #[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub enum TypeRef {
@@ -128,11 +177,32 @@ pub enum TypeRef {
     MutRef(TypeTag),
 }
 
+impl Display for TypeRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Owned(tag) => write!(f, "{tag}"),
+            Self::ImmRef(tag) => write!(f, "&{tag}"),
+            Self::MutRef(tag) => write!(f, "&mut {tag}"),
+        }
+    }
+}
+
 /// Instantiation of a datatype
 #[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct DatatypeInst {
     ident: DatatypeIdent,
     type_args: Vec<TypeTag>,
+}
+
+impl Display for DatatypeInst {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.type_args.is_empty() {
+            write!(f, "{}", self.ident)
+        } else {
+            let inst = self.type_args.iter().join(", ");
+            write!(f, "{}<{inst}>", self.ident)
+        }
+    }
 }
 
 /// Intrinsic datatypes known and specially handled
@@ -359,9 +429,7 @@ impl DatatypeRegistry {
         depth: usize,
     ) -> Vec<DatatypeInst> {
         // recursion termination condition
-        if depth == 0 {
-            return vec![];
-        }
+        assert_ne!(depth, 0);
 
         // check each decl and see whether it matches with the constraint
         let mut result = vec![];
