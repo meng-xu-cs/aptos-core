@@ -68,7 +68,7 @@ impl Display for DatatypeIdent {
 }
 
 /// A unique identifier for a function
-#[derive(Clone, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct FunctionIdent {
     module: ModuleIdent,
     function: Identifier,

@@ -60,6 +60,10 @@ pub enum AuditCommand {
         /// Mark the main packages to fuzz
         #[clap(flatten)]
         pkg_filter: FilterPackage,
+
+        /// Type recursion depth
+        #[clap(long, default_value = "2")]
+        type_recursion_depth: usize,
     },
 }
 
@@ -225,7 +229,11 @@ fn cmd_exec(project: &Project, runbook: &Path, realistic_gas: bool) -> Result<()
     result
 }
 
-fn cmd_fuzz(project: Project, pkg_filter: FilterPackage) -> Result<()> {
+fn cmd_fuzz(
+    project: Project,
+    pkg_filter: FilterPackage,
+    type_recursion_depth: usize,
+) -> Result<()> {
     // fuzzing is only supported on the latest compiler
     if !matches!(project.language.version, LanguageVersion::V2_1) {
         bail!(
@@ -264,7 +272,7 @@ fn cmd_fuzz(project: Project, pkg_filter: FilterPackage) -> Result<()> {
     }
 
     // done with preparation, now call the fuzzer
-    fuzz::run_on(pkg_defs)
+    fuzz::run_on(pkg_defs, type_recursion_depth)
 }
 
 /// Entrypoint on multi-package auditing
@@ -411,8 +419,11 @@ pub fn run_on(
                 cmd_exec(&project, &target, realistic_gas)?;
             }
         },
-        AuditCommand::Fuzz { pkg_filter } => {
-            cmd_fuzz(project, pkg_filter)?;
+        AuditCommand::Fuzz {
+            pkg_filter,
+            type_recursion_depth,
+        } => {
+            cmd_fuzz(project, pkg_filter, type_recursion_depth)?;
         },
     }
 

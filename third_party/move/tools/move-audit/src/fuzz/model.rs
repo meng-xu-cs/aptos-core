@@ -15,7 +15,7 @@ impl Model {
     }
 
     /// Analyze a closure of packages
-    pub fn provision(&mut self, pkgs: &[PkgDefinition]) {
+    pub fn provision(&mut self, pkgs: &[PkgDefinition], type_recursion_depth: usize) {
         // initialize the datatype registry
         let mut datatype_registry = DatatypeRegistry::new();
         for pkg in pkgs {
@@ -55,7 +55,8 @@ impl Model {
         }
 
         // generate fuzzing drivers for each and every primary function
-        let mut generator = DriverGenerator::new(&datatype_registry, &function_registry);
+        let mut generator =
+            DriverGenerator::new(&datatype_registry, &function_registry, type_recursion_depth);
         for decl in function_registry.iter_decls() {
             if !decl.is_primary() {
                 continue;
