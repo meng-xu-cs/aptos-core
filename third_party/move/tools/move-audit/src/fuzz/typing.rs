@@ -1,22 +1,45 @@
 use crate::fuzz::ident::DatatypeIdent;
+use itertools::Itertools;
 use move_binary_format::{
     access::ModuleAccess,
-    file_format::{AbilitySet, SignatureToken},
+    file_format::{Ability, AbilitySet, SignatureToken},
     CompiledModule,
 };
 use move_core_types::account_address::AccountAddress;
 use std::collections::BTreeMap;
 
 /// Variants of vector implementation
-#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub enum VectorVariant {
     Vector,
     BigVector,
     SmartVector,
 }
 
+impl VectorVariant {
+    pub fn abilities(&self) -> AbilitySet {
+        match self {
+            Self::Vector => AbilitySet::VECTOR,
+            Self::BigVector | Self::SmartVector => AbilitySet::EMPTY | Ability::Store,
+        }
+    }
+
+    pub fn type_param_element(&self) -> AbilitySet {
+        match self {
+            Self::Vector => AbilitySet::EMPTY,
+            Self::BigVector | Self::SmartVector => AbilitySet::EMPTY | Ability::Store,
+        }
+    }
+}
+
+const VECTOR_VARIANTS: &[VectorVariant] = &[
+    VectorVariant::Vector,
+    VectorVariant::BigVector,
+    VectorVariant::SmartVector,
+];
+
 /// Variants of map implementation
-#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub enum MapVariant {
     Table,
     TableWithLength,
@@ -26,8 +49,52 @@ pub enum MapVariant {
     BigOrderedMap,
 }
 
+impl MapVariant {
+    pub fn abilities(&self) -> AbilitySet {
+        match self {
+            Self::Table | Self::TableWithLength | Self::SmartTable | Self::BigOrderedMap => {
+                AbilitySet::EMPTY | Ability::Store
+            },
+            Self::SimpleMap | Self::OrderedMap => {
+                AbilitySet::EMPTY | Ability::Copy | Ability::Drop | Ability::Store
+            },
+        }
+    }
+
+    pub fn type_param_key(&self) -> AbilitySet {
+        match self {
+            Self::Table | Self::TableWithLength => {
+                AbilitySet::EMPTY | Ability::Copy | Ability::Drop
+            },
+            Self::SmartTable => AbilitySet::EMPTY | Ability::Copy | Ability::Drop | Ability::Store,
+            Self::SimpleMap | Self::BigOrderedMap => AbilitySet::EMPTY | Ability::Store,
+            Self::OrderedMap => AbilitySet::EMPTY,
+        }
+    }
+
+    pub fn type_param_value(&self) -> AbilitySet {
+        match self {
+            Self::Table
+            | Self::TableWithLength
+            | Self::SmartTable
+            | Self::SimpleMap
+            | Self::BigOrderedMap => AbilitySet::EMPTY | Ability::Store,
+            Self::OrderedMap => AbilitySet::EMPTY,
+        }
+    }
+}
+
+const MAP_VARIANTS: &[MapVariant] = &[
+    MapVariant::Table,
+    MapVariant::TableWithLength,
+    MapVariant::SmartTable,
+    MapVariant::SimpleMap,
+    MapVariant::OrderedMap,
+    MapVariant::BigOrderedMap,
+];
+
 /// A concrete type instance within a typing context
-#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub enum TypeTag {
     Bool,
     U8,
@@ -54,7 +121,7 @@ pub enum TypeTag {
 }
 
 /// A type that can appear in function declarations
-#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub enum TypeRef {
     Owned(TypeTag),
     ImmRef(TypeTag),
@@ -62,7 +129,7 @@ pub enum TypeRef {
 }
 
 /// Instantiation of a datatype
-#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct DatatypeInst {
     ident: DatatypeIdent,
     type_args: Vec<TypeTag>,
@@ -280,23 +347,78 @@ impl DatatypeRegistry {
         }
     }
 
-    /// Find all declarations that match the ability requirement
-    pub fn datatypes_by_ability_constraint(&self, constraint: AbilitySet) -> Vec<DatatypeIdent> {
+    /// Find all declarations that match the ability requirement, up to `depth`
+    ///
+    /// - depth == 0 is the recursion termination condition
+    /// - depth == 1 means do not instantiate any generic types, (e.g., `S<T>` will be ruled out)
+    /// - depth == 2 means instantiate it at max once (e.g., `S<u64>`, `S<R>`, etc.)
+    /// - depth == 3 means instantiate it at max twice (e.g., `S<S<u64>>`, `S<S<R>>`, etc.)
+    pub fn datatypes_by_ability_constraint(
+        &self,
+        constraint: AbilitySet,
+        depth: usize,
+    ) -> Vec<DatatypeInst> {
+        // recursion termination condition
+        if depth == 0 {
+            return vec![];
+        }
+
+        // check each decl and see whether it matches with the constraint
+        let mut result = vec![];
         for decl in self.decls.values() {
             // short-circuit if the constraint is not met
             if !constraint.is_subset(decl.abilities) {
                 continue;
             }
 
-            // try to instantiate
-            todo!()
+            // no need to instantiate
+            if decl.generics.is_empty() {
+                result.push(DatatypeInst {
+                    ident: decl.ident.clone(),
+                    type_args: vec![],
+                });
+                continue;
+            }
+
+            // derive the baseline constraint for type instantiations
+            let required_constraint = constraint.requires();
+
+            // instantiate the type arguments
+            let mut ty_args_combo = vec![];
+            for (requirement, is_phantom) in &decl.generics {
+                let param_constraint = if *is_phantom {
+                    *requirement
+                } else {
+                    required_constraint.union(*requirement)
+                };
+                let ty_args = self.type_tags_by_ability_constraint(param_constraint, depth - 1);
+                ty_args_combo.push(ty_args);
+            }
+
+            for inst in ty_args_combo.iter().multi_cartesian_product() {
+                result.push(DatatypeInst {
+                    ident: decl.ident.clone(),
+                    type_args: inst.into_iter().cloned().collect(),
+                });
+            }
         }
-        todo!()
+        result
     }
 
     /// Find all type tags that match the ability requirement
-    pub fn type_tags_by_ability_constraint(&self, constraint: AbilitySet) -> Vec<TypeTag> {
+    pub fn type_tags_by_ability_constraint(
+        &self,
+        constraint: AbilitySet,
+        depth: usize,
+    ) -> Vec<TypeTag> {
+        // recursion termination condition
+        if depth == 0 {
+            return vec![];
+        }
+
         let mut result = vec![];
+
+        // primitives
         if constraint.is_subset(AbilitySet::PRIMITIVES) {
             result.push(TypeTag::Bool);
             result.push(TypeTag::U8);
@@ -312,24 +434,60 @@ impl DatatypeRegistry {
         if constraint.is_subset(AbilitySet::SIGNER) {
             result.push(TypeTag::Signer);
         }
-        result
-    }
 
-    /// Find all type refs that match the ability requirement
-    pub fn type_refs_by_ability_constraint(&self, constraint: AbilitySet) -> Vec<TypeRef> {
-        let mut result = self
-            .type_tags_by_ability_constraint(constraint)
-            .into_iter()
-            .map(TypeRef::Owned)
-            .collect();
+        // data structures
+        for variant in VECTOR_VARIANTS {
+            let variant_abilities = variant.abilities();
+            if !constraint.is_subset(variant_abilities) {
+                continue;
+            }
 
-        if constraint.is_subset(AbilitySet::REFERENCES) {
-            let _ = self
-                .type_tags_by_ability_constraint(AbilitySet::EMPTY)
-                .into_iter()
-                .map(TypeRef::ImmRef);
-            todo!()
+            // derive the baseline constraint for type instantiations
+            let required_constraint = constraint.requires();
+            let element_constraint = required_constraint.union(variant.type_param_element());
+            for inst in self.type_tags_by_ability_constraint(element_constraint, depth - 1) {
+                result.push(TypeTag::Vector {
+                    element: inst.into(),
+                    variant: variant.clone(),
+                });
+            }
         }
+        for variant in MAP_VARIANTS {
+            let variant_abilities = variant.abilities();
+            if !constraint.is_subset(variant_abilities) {
+                continue;
+            }
+
+            // derive the baseline constraint for type instantiations
+            let required_constraint = constraint.requires();
+            let key_constraint = required_constraint.union(variant.type_param_key());
+            let key_insts = self.type_tags_by_ability_constraint(key_constraint, depth - 1);
+            if key_insts.is_empty() {
+                continue;
+            }
+
+            let value_constraint = required_constraint.union(variant.type_param_value());
+            let value_insts = self.type_tags_by_ability_constraint(value_constraint, depth - 1);
+
+            for ty_key in &key_insts {
+                for ty_value in &value_insts {
+                    result.push(TypeTag::Map {
+                        key: ty_key.clone().into(),
+                        value: ty_value.clone().into(),
+                        variant: variant.clone(),
+                    })
+                }
+            }
+        }
+
+        // data types
+        result.extend(
+            self.datatypes_by_ability_constraint(constraint, depth)
+                .into_iter()
+                .map(TypeTag::Datatype),
+        );
+
+        // done
         result
     }
 }
