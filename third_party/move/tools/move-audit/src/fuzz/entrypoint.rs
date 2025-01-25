@@ -15,14 +15,7 @@ pub struct FunctionDecl {
     pub generics: Vec<AbilitySet>,
     pub parameters: Vec<TypeRef>,
     pub return_sig: Vec<TypeRef>,
-    is_primary: bool,
-}
-
-impl FunctionDecl {
-    /// Check whether this function is defined in the primary target
-    pub fn is_primary(&self) -> bool {
-        self.is_primary
-    }
+    pub is_primary: bool,
 }
 
 pub struct FunctionRegistry {
