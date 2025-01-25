@@ -1,7 +1,7 @@
 use crate::fuzz::{
     entrypoint::{FunctionDecl, FunctionRegistry},
     ident::FunctionIdent,
-    typing::{DatatypeRegistry, TypeBase, TypeTag},
+    typing::{DatatypeRegistry, TypeBase, TypeItem, TypeTag},
 };
 use itertools::Itertools;
 use std::fmt::Display;
@@ -102,6 +102,28 @@ impl<'a> DriverGenerator<'a> {
             .collect();
 
         // check if this is trivial
+        // TODO: this is only a temporary logging
+        for t in &params {
+            if !t.has_trivial_ctor() {
+                log::info!("no trivial ctor: {inst}");
+                continue;
+            }
+            match t {
+                TypeItem::Base(_) => (),
+                TypeItem::ImmRef(base) | TypeItem::MutRef(base) => {
+                    if !base.has_trivial_dtor() {
+                        log::info!("no trivial dtor: {inst}");
+                        continue;
+                    }
+                },
+            }
+        }
+        for t in &ret_ty {
+            if !t.has_trivial_dtor() {
+                log::info!("no trivial dtor: {inst}");
+                continue;
+            }
+        }
     }
 
     /// Generate drivers (zero to multiple) for an entrypoint declaration
