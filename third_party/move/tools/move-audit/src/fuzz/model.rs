@@ -61,7 +61,7 @@ impl Model {
             if !decl.is_primary() {
                 continue;
             }
-            generator.generate(decl);
+            generator.generate_drivers_for_decl(decl);
         }
     }
 }

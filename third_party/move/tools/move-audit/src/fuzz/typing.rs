@@ -17,6 +17,7 @@ pub enum VectorVariant {
 }
 
 impl VectorVariant {
+    /// The declared abilities of this vector variant
     pub fn abilities(&self) -> AbilitySet {
         match self {
             Self::Vector => AbilitySet::VECTOR,
@@ -24,6 +25,7 @@ impl VectorVariant {
         }
     }
 
+    /// The ability constraint of the type parameter representing the element
     pub fn type_param_element(&self) -> AbilitySet {
         match self {
             Self::Vector => AbilitySet::EMPTY,
@@ -60,6 +62,7 @@ pub enum MapVariant {
 }
 
 impl MapVariant {
+    /// The declared abilities of this map variant
     pub fn abilities(&self) -> AbilitySet {
         match self {
             Self::Table | Self::TableWithLength | Self::SmartTable | Self::BigOrderedMap => {
@@ -71,6 +74,7 @@ impl MapVariant {
         }
     }
 
+    /// The ability constraint of the type parameter representing the key
     pub fn type_param_key(&self) -> AbilitySet {
         match self {
             Self::Table | Self::TableWithLength => {
@@ -82,6 +86,7 @@ impl MapVariant {
         }
     }
 
+    /// The ability constraint of the type parameter representing the value
     pub fn type_param_value(&self) -> AbilitySet {
         match self {
             Self::Table
@@ -143,6 +148,43 @@ pub enum TypeTag {
     Param(usize),
 }
 
+impl TypeTag {
+    /// Instantiate type parameters in this type tag with the type arguments
+    pub fn instantiate(&self, ty_args: &[TypeTag]) -> Self {
+        match self {
+            Self::Bool => Self::Bool,
+            Self::U8 => Self::U8,
+            Self::U16 => Self::U16,
+            Self::U32 => Self::U32,
+            Self::U64 => Self::U64,
+            Self::U128 => Self::U128,
+            Self::U256 => Self::U256,
+            Self::Bitvec => Self::Bitvec,
+            Self::String => Self::String,
+            Self::Address => Self::Address,
+            Self::Signer => Self::Signer,
+            Self::Vector { element, variant } => Self::Vector {
+                element: element.instantiate(ty_args).into(),
+                variant: variant.clone(),
+            },
+            Self::Map {
+                key,
+                value,
+                variant,
+            } => Self::Map {
+                key: key.instantiate(ty_args).into(),
+                value: value.instantiate(ty_args).into(),
+                variant: variant.clone(),
+            },
+            Self::Datatype(datatype) => Self::Datatype(datatype.instantiate(ty_args)),
+            Self::Param(index) => ty_args
+                .get(*index)
+                .expect("type arguments in bound")
+                .clone(),
+        }
+    }
+}
+
 impl Display for TypeTag {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -177,6 +219,17 @@ pub enum TypeRef {
     MutRef(TypeTag),
 }
 
+impl TypeRef {
+    /// Instantiate type parameters in this type ref with the type arguments
+    pub fn instantiate(&self, ty_args: &[TypeTag]) -> Self {
+        match self {
+            Self::Owned(tag) => Self::Owned(tag.instantiate(ty_args)),
+            Self::ImmRef(tag) => Self::ImmRef(tag.instantiate(ty_args)),
+            Self::MutRef(tag) => Self::MutRef(tag.instantiate(ty_args)),
+        }
+    }
+}
+
 impl Display for TypeRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -192,6 +245,20 @@ impl Display for TypeRef {
 pub struct DatatypeInst {
     ident: DatatypeIdent,
     type_args: Vec<TypeTag>,
+}
+
+impl DatatypeInst {
+    /// Instantiate type parameters in the datatype instance with type arguments
+    pub fn instantiate(&self, ty_args: &[TypeTag]) -> Self {
+        Self {
+            ident: self.ident.clone(),
+            type_args: self
+                .type_args
+                .iter()
+                .map(|t| t.instantiate(ty_args))
+                .collect(),
+        }
+    }
 }
 
 impl Display for DatatypeInst {
