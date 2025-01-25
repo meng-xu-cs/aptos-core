@@ -405,6 +405,28 @@ pub enum TypeItem {
     MutRef(TypeBase),
 }
 
+impl TypeItem {
+    /// Retrieve the abilities of this type base
+    pub fn abilities(&self) -> AbilitySet {
+        match self {
+            Self::Base(base) => base.abilities(),
+            Self::ImmRef(_) | Self::MutRef(_) => AbilitySet::REFERENCES,
+        }
+    }
+
+    /// Check if a type item can be constructed trivially
+    pub fn has_trivial_ctor(&self) -> bool {
+        match self {
+            Self::Base(base) | Self::ImmRef(base) | Self::MutRef(base) => base.has_trivial_ctor(),
+        }
+    }
+
+    /// Check if a type item can be destructed trivially
+    pub fn has_trivial_dtor(&self) -> bool {
+        self.abilities().has_drop()
+    }
+}
+
 impl Display for TypeItem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
