@@ -1,7 +1,7 @@
 use crate::fuzz::{
     entrypoint::{FunctionDecl, FunctionRegistry},
     ident::FunctionIdent,
-    typing::{DatatypeRegistry, TypeRef, TypeTag},
+    typing::{DatatypeRegistry, TypeBase, TypeTag},
 };
 use itertools::Itertools;
 use std::fmt::Display;
@@ -10,7 +10,7 @@ use std::fmt::Display;
 #[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct FunctionInst {
     ident: FunctionIdent,
-    type_args: Vec<TypeTag>,
+    type_args: Vec<TypeBase>,
 }
 
 impl Display for FunctionInst {
@@ -63,7 +63,7 @@ impl<'a> DriverGenerator<'a> {
         for constraint in &decl.generics {
             let ty_args = self
                 .datatype_registry
-                .type_tags_by_ability_constraint(*constraint, self.type_recursion_depth);
+                .type_bases_by_ability_constraint(*constraint, self.type_recursion_depth);
             ty_args_combo.push(ty_args);
         }
 
@@ -87,12 +87,18 @@ impl<'a> DriverGenerator<'a> {
         let params: Vec<_> = decl
             .parameters
             .iter()
-            .map(|t| t.instantiate(&inst.type_args))
+            .map(|t| {
+                self.datatype_registry
+                    .instantiate_type_ref(t, &inst.type_args)
+            })
             .collect();
         let ret_ty: Vec<_> = decl
             .return_sig
             .iter()
-            .map(|t| t.instantiate(&inst.type_args))
+            .map(|t| {
+                self.datatype_registry
+                    .instantiate_type_ref(t, &inst.type_args)
+            })
             .collect();
 
         // check if this is trivial

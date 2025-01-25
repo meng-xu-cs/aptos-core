@@ -58,7 +58,7 @@ impl Model {
         let mut generator =
             DriverGenerator::new(&datatype_registry, &function_registry, type_recursion_depth);
         for decl in function_registry.iter_decls() {
-            if !decl.is_primary() {
+            if !decl.is_primary {
                 continue;
             }
             generator.generate_drivers_for_decl(decl);
