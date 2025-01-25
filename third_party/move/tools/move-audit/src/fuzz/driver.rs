@@ -1,7 +1,7 @@
 use crate::fuzz::{
     entrypoint::{FunctionDecl, FunctionRegistry},
     ident::FunctionIdent,
-    typing::{DatatypeInst, DatatypeRegistry, TypeTag},
+    typing::{DatatypeRegistry, TypeRef, TypeTag},
 };
 use itertools::Itertools;
 use std::fmt::Display;
@@ -45,8 +45,8 @@ impl<'a> DriverGenerator<'a> {
         }
     }
 
-    /// Derive possible function instantiations
-    fn derive_function_insts(&self, decl: &FunctionDecl) -> Vec<FunctionInst> {
+    /// Collect possible function instantiations
+    fn collect_function_insts(&self, decl: &FunctionDecl) -> Vec<FunctionInst> {
         let mut result = vec![];
 
         // shortcut when this function is not a generic function
@@ -78,13 +78,31 @@ impl<'a> DriverGenerator<'a> {
         result
     }
 
-    /// Generate drivers (which could be zero to multiple) for an entrypoint
-    pub fn generate(&mut self, decl: &FunctionDecl) {
-        log::info!("processing decl {}", decl.ident);
+    /// Generate drivers (zero to multiple) for an entrypoint instance
+    fn generate_drivers_for_inst(&mut self, decl: &FunctionDecl, inst: &FunctionInst) {
+        debug_assert_eq!(decl.ident, inst.ident);
+        log::debug!("deriving script for {inst}");
 
+        // further instantiate parameter and return types
+        let params: Vec<_> = decl
+            .parameters
+            .iter()
+            .map(|t| t.instantiate(&inst.type_args))
+            .collect();
+        let ret_ty: Vec<_> = decl
+            .return_sig
+            .iter()
+            .map(|t| t.instantiate(&inst.type_args))
+            .collect();
+
+        // check if this is trivial
+    }
+
+    /// Generate drivers (zero to multiple) for an entrypoint declaration
+    pub fn generate_drivers_for_decl(&mut self, decl: &FunctionDecl) {
         // derive instantiations
-        for inst in self.derive_function_insts(decl) {
-            log::info!("  - processing inst {inst}");
+        for inst in self.collect_function_insts(decl) {
+            self.generate_drivers_for_inst(decl, &inst);
         }
     }
 }
