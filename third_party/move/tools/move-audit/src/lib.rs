@@ -370,7 +370,7 @@ pub fn run_on(
         None
     } else {
         let dir = TempDir::new()?;
-        fs_extra::dir::copy(&path, dir.path(), &CopyOptions::new())?;
+        fs_extra::dir::copy(&path, dir.path(), &CopyOptions::new().content_only(true))?;
         Some(dir)
     };
     let workdir = tempdir
@@ -381,7 +381,15 @@ pub fn run_on(
     // resolve the project
     let project = deps::resolve(
         &workdir,
-        subdirs.into_iter().map(|p| workdir.join(p)).collect(),
+        subdirs
+            .into_iter()
+            .map(|p| {
+                workdir
+                    .join(p)
+                    .canonicalize()
+                    .expect("canonicalized path in work directory")
+            })
+            .collect(),
         language,
         address_aliases.into_iter().collect(),
         resource_mapping,
