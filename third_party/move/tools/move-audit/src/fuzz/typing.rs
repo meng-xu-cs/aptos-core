@@ -216,13 +216,6 @@ impl Display for TypeRef {
     }
 }
 
-/// Instantiation of a datatype
-#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
-pub struct DatatypeInst {
-    ident: DatatypeIdent,
-    type_args: Vec<TypeTag>,
-}
-
 /// Intrinsic datatypes known and specially handled
 pub enum IntrinsicType {
     Bitvec,
@@ -349,39 +342,6 @@ impl TypeBase {
             } => *abilities,
         }
     }
-
-    /// Check if a type base can be constructed trivially
-    pub fn has_trivial_ctor(&self) -> bool {
-        match self {
-            Self::Bool
-            | Self::U8
-            | Self::U16
-            | Self::U32
-            | Self::U64
-            | Self::U128
-            | Self::U256
-            | Self::Bitvec
-            | Self::String
-            | Self::Address
-            | Self::Signer
-            | Self::Object { .. } => true,
-            Self::Vector {
-                element,
-                variant: _,
-            } => element.has_trivial_ctor(),
-            Self::Map {
-                key,
-                value,
-                variant: _,
-            } => key.has_trivial_ctor() && value.has_trivial_ctor(),
-            Self::Datatype { .. } => false,
-        }
-    }
-
-    /// Check if a type base can be destructed trivially
-    pub fn has_trivial_dtor(&self) -> bool {
-        self.abilities().has_drop()
-    }
 }
 
 impl Display for TypeBase {
@@ -447,18 +407,6 @@ impl TypeItem {
             Self::Base(base) => base.abilities(),
             Self::ImmRef(_) | Self::MutRef(_) => AbilitySet::REFERENCES,
         }
-    }
-
-    /// Check if a type item can be constructed trivially
-    pub fn has_trivial_ctor(&self) -> bool {
-        match self {
-            Self::Base(base) | Self::ImmRef(base) | Self::MutRef(base) => base.has_trivial_ctor(),
-        }
-    }
-
-    /// Check if a type item can be destructed trivially
-    pub fn has_trivial_dtor(&self) -> bool {
-        self.abilities().has_drop()
     }
 }
 
