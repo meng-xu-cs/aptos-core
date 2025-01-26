@@ -149,6 +149,11 @@ pub enum TypeTag {
         type_args: Vec<Self>,
     },
     Param(usize),
+    ObjectKnown {
+        ident: DatatypeIdent,
+        type_args: Vec<Self>,
+    },
+    ObjectParam(usize),
 }
 
 impl Display for TypeTag {
@@ -180,6 +185,15 @@ impl Display for TypeTag {
                 }
             },
             Self::Param(index) => write!(f, "#{index}"),
+            Self::ObjectKnown { ident, type_args } => {
+                if type_args.is_empty() {
+                    write!(f, "aptos_framework::object::Object<{ident}>")
+                } else {
+                    let inst = type_args.iter().join(", ");
+                    write!(f, "aptos_framework::object::Object<{ident}<{inst}>>")
+                }
+            },
+            Self::ObjectParam(index) => write!(f, "aptos_framework::object::Object<#{index}>"),
         }
     }
 }
@@ -215,6 +229,7 @@ pub enum IntrinsicType {
     String,
     Vector(VectorVariant),
     Map(MapVariant),
+    Object,
 }
 
 impl IntrinsicType {
@@ -235,6 +250,7 @@ impl IntrinsicType {
             ("simple_map", "SimpleMap") => IntrinsicType::Map(MapVariant::SimpleMap),
             ("ordered_map", "OrderedMap") => IntrinsicType::Map(MapVariant::OrderedMap),
             ("big_ordered_map", "BigOrderedMap") => IntrinsicType::Map(MapVariant::BigOrderedMap),
+            ("object", "Object") => IntrinsicType::Object,
             _ => return None,
         };
         Some(parsed)
@@ -277,6 +293,11 @@ pub enum TypeBase {
         type_args: Vec<Self>,
         abilities: AbilitySet,
     },
+    Object {
+        ident: DatatypeIdent,
+        type_args: Vec<Self>,
+        abilities: AbilitySet,
+    },
 }
 
 impl TypeBase {
@@ -292,7 +313,8 @@ impl TypeBase {
             | Self::U256
             | Self::Bitvec
             | Self::String
-            | Self::Address => AbilitySet::PRIMITIVES,
+            | Self::Address
+            | Self::Object { .. } => AbilitySet::PRIMITIVES,
             Self::Signer => AbilitySet::SIGNER,
             Self::Vector { element, variant } => {
                 let mut actual_abilities = AbilitySet::EMPTY;
@@ -341,7 +363,8 @@ impl TypeBase {
             | Self::Bitvec
             | Self::String
             | Self::Address
-            | Self::Signer => true,
+            | Self::Signer
+            | Self::Object { .. } => true,
             Self::Vector {
                 element,
                 variant: _,
@@ -391,6 +414,18 @@ impl Display for TypeBase {
                 } else {
                     let inst = type_args.iter().join(", ");
                     write!(f, "{ident}<{inst}>")
+                }
+            },
+            Self::Object {
+                ident,
+                type_args,
+                abilities: _,
+            } => {
+                if type_args.is_empty() {
+                    write!(f, "aptos_framework::object::Object<{ident}>")
+                } else {
+                    let inst = type_args.iter().join(", ");
+                    write!(f, "aptos_framework::object::Object<{ident}<{inst}>>")
                 }
             },
         }
@@ -514,7 +549,9 @@ impl DatatypeRegistry {
                 match IntrinsicType::try_parse_ident(&ident) {
                     Some(IntrinsicType::Bitvec) => TypeRef::Base(TypeTag::Bitvec),
                     Some(IntrinsicType::String) => TypeRef::Base(TypeTag::String),
-                    Some(IntrinsicType::Vector(_)) | Some(IntrinsicType::Map(_)) => {
+                    Some(IntrinsicType::Vector(_))
+                    | Some(IntrinsicType::Map(_))
+                    | Some(IntrinsicType::Object) => {
                         panic!("parameterized intrinsic type is not expected to be `SignatureToken::Struct`");
                     },
                     None => {
@@ -565,6 +602,16 @@ impl DatatypeRegistry {
                             value: ty_args.pop().unwrap().into(),
                             variant,
                         })
+                    },
+                    Some(IntrinsicType::Object) => {
+                        assert_eq!(ty_args.len(), 1);
+                        match ty_args.pop().unwrap() {
+                            TypeTag::Datatype { ident, type_args } => {
+                                TypeRef::Base(TypeTag::ObjectKnown { ident, type_args })
+                            },
+                            TypeTag::Param(index) => TypeRef::Base(TypeTag::ObjectParam(index)),
+                            _ => panic!("type argument for Object must be a datatype or parameter"),
+                        }
                     },
                     None => {
                         // not an intrinsic type, locate the datatype
@@ -639,8 +686,7 @@ impl DatatypeRegistry {
 
         // collections
         for variant in VECTOR_VARIANTS {
-            let variant_abilities = variant.abilities();
-            if !constraint.is_subset(variant_abilities) {
+            if !constraint.is_subset(variant.abilities()) {
                 continue;
             }
 
@@ -655,8 +701,7 @@ impl DatatypeRegistry {
             }
         }
         for variant in MAP_VARIANTS {
-            let variant_abilities = variant.abilities();
-            if !constraint.is_subset(variant_abilities) {
+            if !constraint.is_subset(variant.abilities()) {
                 continue;
             }
 
@@ -694,7 +739,7 @@ impl DatatypeRegistry {
                 result.push(TypeBase::Datatype {
                     ident: decl.ident.clone(),
                     type_args: vec![],
-                    abilities: decl.abilities.clone(),
+                    abilities: decl.abilities,
                 });
                 continue;
             }
@@ -722,6 +767,28 @@ impl DatatypeRegistry {
                     type_args: ty_args,
                     abilities: actual_abilities,
                 });
+            }
+        }
+
+        // object
+        if constraint.is_subset(AbilitySet::PRIMITIVES) {
+            for item in
+                self.type_bases_by_ability_constraint(AbilitySet::EMPTY | Ability::Key, depth - 1)
+            {
+                match item {
+                    TypeBase::Datatype {
+                        ident,
+                        type_args,
+                        abilities,
+                    } => {
+                        result.push(TypeBase::Object {
+                            ident,
+                            type_args,
+                            abilities,
+                        });
+                    },
+                    _ => panic!("the type argument of Object must be a datatype"),
+                }
             }
         }
 
@@ -764,7 +831,7 @@ impl DatatypeRegistry {
                     TypeBase::Datatype {
                         ident: ident.clone(),
                         type_args: vec![],
-                        abilities: decl.abilities.clone(),
+                        abilities: decl.abilities,
                     }
                 } else {
                     let ty_args: Vec<_> = type_args
@@ -783,6 +850,43 @@ impl DatatypeRegistry {
                 .get(*index)
                 .expect("type arguments in bound")
                 .clone(),
+            TypeTag::ObjectKnown { ident, type_args } => {
+                let decl = self.decls.get(ident).expect("valid datatype ident only");
+                debug_assert_eq!(type_args.len(), decl.generics.len());
+
+                if type_args.is_empty() {
+                    TypeBase::Object {
+                        ident: ident.clone(),
+                        type_args: vec![],
+                        abilities: decl.abilities,
+                    }
+                } else {
+                    let ty_args: Vec<_> = type_args
+                        .iter()
+                        .map(|t| self.instantiate_type_tag(t, ty_args))
+                        .collect();
+                    let actual_abilities = derive_actual_ability(decl, &ty_args);
+                    TypeBase::Object {
+                        ident: ident.clone(),
+                        type_args: ty_args,
+                        abilities: actual_abilities,
+                    }
+                }
+            },
+            TypeTag::ObjectParam(index) => {
+                match ty_args.get(*index).expect("type arguments in bound") {
+                    TypeBase::Datatype {
+                        ident,
+                        type_args,
+                        abilities,
+                    } => TypeBase::Object {
+                        ident: ident.clone(),
+                        type_args: type_args.clone(),
+                        abilities: *abilities,
+                    },
+                    _ => panic!("type argument for Object must be a datatype"),
+                }
+            },
         }
     }
 
