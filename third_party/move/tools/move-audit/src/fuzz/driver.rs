@@ -1,9 +1,10 @@
 use crate::fuzz::{
     entrypoint::{FunctionDecl, FunctionRegistry},
-    ident::FunctionIdent,
-    typing::{DatatypeRegistry, TypeBase, TypeItem, TypeTag},
+    ident::{DatatypeIdent, FunctionIdent},
+    typing::{DatatypeRegistry, MapVariant, TypeBase, TypeItem, VectorVariant},
 };
 use itertools::Itertools;
+use move_binary_format::file_format::AbilitySet;
 use std::fmt::Display;
 
 /// Instantiation of a function
@@ -20,6 +21,260 @@ impl Display for FunctionInst {
         } else {
             let inst = self.type_args.iter().join(", ");
             write!(f, "{}<{inst}>", self.ident)
+        }
+    }
+}
+
+/// Types that can be trivially constructed and destructed
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
+pub enum SimpleType {
+    Bool,
+    U8,
+    U16,
+    U32,
+    U64,
+    U128,
+    U256,
+    Bitvec,
+    String,
+    Address,
+    Signer,
+    Vector {
+        element: Box<Self>,
+        variant: VectorVariant,
+    },
+    Map {
+        key: Box<Self>,
+        value: Box<Self>,
+        variant: MapVariant,
+    },
+    Object {
+        ident: DatatypeIdent,
+        type_args: Vec<TypeBase>,
+        abilities: AbilitySet,
+    },
+}
+
+impl From<SimpleType> for TypeBase {
+    fn from(t: SimpleType) -> TypeBase {
+        match t {
+            SimpleType::Bool => TypeBase::Bool,
+            SimpleType::U8 => TypeBase::U8,
+            SimpleType::U16 => TypeBase::U16,
+            SimpleType::U32 => TypeBase::U32,
+            SimpleType::U64 => TypeBase::U64,
+            SimpleType::U128 => TypeBase::U128,
+            SimpleType::U256 => TypeBase::U256,
+            SimpleType::Bitvec => TypeBase::Bitvec,
+            SimpleType::String => TypeBase::String,
+            SimpleType::Address => TypeBase::Address,
+            SimpleType::Signer => TypeBase::Signer,
+            SimpleType::Vector { element, variant } => TypeBase::Vector {
+                element: Box::new((*element).into()),
+                variant,
+            },
+            SimpleType::Map {
+                key,
+                value,
+                variant,
+            } => TypeBase::Map {
+                key: Box::new((*key).into()),
+                value: Box::new((*value).into()),
+                variant,
+            },
+            SimpleType::Object {
+                ident,
+                type_args,
+                abilities,
+            } => TypeBase::Object {
+                ident,
+                type_args,
+                abilities,
+            },
+        }
+    }
+}
+
+/// A type closure constructed based on datatypes (cannot be trivially handled)
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
+pub enum ComplexType {
+    Unit {
+        ident: DatatypeIdent,
+        type_args: Vec<TypeBase>,
+        abilities: AbilitySet,
+    },
+    Vector {
+        element: Box<Self>,
+        variant: VectorVariant,
+    },
+    MapOnKey {
+        key: Box<Self>,
+        value: SimpleType,
+        variant: MapVariant,
+    },
+    MapOnValue {
+        key: SimpleType,
+        value: Box<Self>,
+        variant: MapVariant,
+    },
+    MapOnBoth {
+        key: Box<Self>,
+        value: Box<Self>,
+        variant: MapVariant,
+    },
+}
+
+impl From<ComplexType> for TypeBase {
+    fn from(t: ComplexType) -> TypeBase {
+        match t {
+            ComplexType::Unit {
+                ident,
+                type_args,
+                abilities,
+            } => TypeBase::Datatype {
+                ident,
+                type_args,
+                abilities,
+            },
+            ComplexType::Vector { element, variant } => TypeBase::Vector {
+                element: Box::new((*element).into()),
+                variant,
+            },
+            ComplexType::MapOnKey {
+                key,
+                value,
+                variant,
+            } => TypeBase::Map {
+                key: Box::new((*key).into()),
+                value: Box::new(value.into()),
+                variant,
+            },
+            ComplexType::MapOnValue {
+                key,
+                value,
+                variant,
+            } => TypeBase::Map {
+                key: Box::new(key.into()),
+                value: Box::new((*value).into()),
+                variant,
+            },
+            ComplexType::MapOnBoth {
+                key,
+                value,
+                variant,
+            } => TypeBase::Map {
+                key: Box::new((*key).into()),
+                value: Box::new((*value).into()),
+                variant,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
+pub enum TypeClosureBase {
+    Simple(SimpleType),
+    Complex(ComplexType),
+}
+
+impl From<TypeBase> for TypeClosureBase {
+    fn from(t: TypeBase) -> TypeClosureBase {
+        match t {
+            TypeBase::Bool => TypeClosureBase::Simple(SimpleType::Bool),
+            TypeBase::U8 => TypeClosureBase::Simple(SimpleType::U8),
+            TypeBase::U16 => TypeClosureBase::Simple(SimpleType::U16),
+            TypeBase::U32 => TypeClosureBase::Simple(SimpleType::U32),
+            TypeBase::U64 => TypeClosureBase::Simple(SimpleType::U64),
+            TypeBase::U128 => TypeClosureBase::Simple(SimpleType::U128),
+            TypeBase::U256 => TypeClosureBase::Simple(SimpleType::U256),
+            TypeBase::Bitvec => TypeClosureBase::Simple(SimpleType::Bitvec),
+            TypeBase::String => TypeClosureBase::Simple(SimpleType::String),
+            TypeBase::Address => TypeClosureBase::Simple(SimpleType::Address),
+            TypeBase::Signer => TypeClosureBase::Simple(SimpleType::Signer),
+            TypeBase::Vector { element, variant } => match TypeClosureBase::from(*element) {
+                TypeClosureBase::Simple(simple_element) => {
+                    TypeClosureBase::Simple(SimpleType::Vector {
+                        element: simple_element.into(),
+                        variant,
+                    })
+                },
+                TypeClosureBase::Complex(complex_element) => {
+                    TypeClosureBase::Complex(ComplexType::Vector {
+                        element: complex_element.into(),
+                        variant,
+                    })
+                },
+            },
+            TypeBase::Map {
+                key,
+                value,
+                variant,
+            } => match (TypeClosureBase::from(*key), TypeClosureBase::from(*value)) {
+                (TypeClosureBase::Simple(simple_key), TypeClosureBase::Simple(simple_value)) => {
+                    TypeClosureBase::Simple(SimpleType::Map {
+                        key: simple_key.into(),
+                        value: simple_value.into(),
+                        variant,
+                    })
+                },
+                (TypeClosureBase::Simple(simple_key), TypeClosureBase::Complex(complex_value)) => {
+                    TypeClosureBase::Complex(ComplexType::MapOnValue {
+                        key: simple_key,
+                        value: complex_value.into(),
+                        variant,
+                    })
+                },
+                (TypeClosureBase::Complex(complex_key), TypeClosureBase::Simple(simple_value)) => {
+                    TypeClosureBase::Complex(ComplexType::MapOnKey {
+                        key: complex_key.into(),
+                        value: simple_value,
+                        variant,
+                    })
+                },
+                (
+                    TypeClosureBase::Complex(complex_key),
+                    TypeClosureBase::Complex(complex_value),
+                ) => TypeClosureBase::Complex(ComplexType::MapOnBoth {
+                    key: complex_key.into(),
+                    value: complex_value.into(),
+                    variant,
+                }),
+            },
+            TypeBase::Datatype {
+                ident,
+                type_args,
+                abilities,
+            } => TypeClosureBase::Complex(ComplexType::Unit {
+                ident,
+                type_args,
+                abilities,
+            }),
+            TypeBase::Object {
+                ident,
+                type_args,
+                abilities,
+            } => TypeClosureBase::Simple(SimpleType::Object {
+                ident,
+                type_args,
+                abilities,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
+pub enum TypeClosureItem {
+    Base(TypeClosureBase),
+    ImmRef(TypeClosureBase),
+    MutRef(TypeClosureBase),
+}
+
+impl From<TypeItem> for TypeClosureItem {
+    fn from(t: TypeItem) -> TypeClosureItem {
+        match t {
+            TypeItem::Base(base) => TypeClosureItem::Base(base.into()),
+            TypeItem::ImmRef(base) => TypeClosureItem::ImmRef(base.into()),
+            TypeItem::MutRef(base) => TypeClosureItem::MutRef(base.into()),
         }
     }
 }
@@ -88,42 +343,22 @@ impl<'a> DriverGenerator<'a> {
             .parameters
             .iter()
             .map(|t| {
-                self.datatype_registry
-                    .instantiate_type_ref(t, &inst.type_args)
+                TypeClosureItem::from(
+                    self.datatype_registry
+                        .instantiate_type_ref(t, &inst.type_args),
+                )
             })
             .collect();
         let ret_ty: Vec<_> = decl
             .return_sig
             .iter()
             .map(|t| {
-                self.datatype_registry
-                    .instantiate_type_ref(t, &inst.type_args)
+                TypeClosureItem::from(
+                    self.datatype_registry
+                        .instantiate_type_ref(t, &inst.type_args),
+                )
             })
             .collect();
-
-        // check if this is trivial
-        // TODO: this is only a temporary logging
-        for t in &params {
-            if !t.has_trivial_ctor() {
-                log::info!("no trivial ctor: {inst}");
-                continue;
-            }
-            match t {
-                TypeItem::Base(_) => (),
-                TypeItem::ImmRef(base) | TypeItem::MutRef(base) => {
-                    if !base.has_trivial_dtor() {
-                        log::info!("no trivial dtor: {inst}");
-                        continue;
-                    }
-                },
-            }
-        }
-        for t in &ret_ty {
-            if !t.has_trivial_dtor() {
-                log::info!("no trivial dtor: {inst}");
-                continue;
-            }
-        }
     }
 
     /// Generate drivers (zero to multiple) for an entrypoint declaration
