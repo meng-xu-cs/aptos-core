@@ -5,7 +5,10 @@ use crate::fuzz::{
 };
 use itertools::Itertools;
 use move_binary_format::file_format::AbilitySet;
-use std::fmt::Display;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Display,
+};
 
 /// Instantiation of a function
 #[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
@@ -279,11 +282,31 @@ impl From<TypeItem> for TypeClosureItem {
     }
 }
 
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
+pub enum ComplexItem {
+    Base(ComplexType),
+    ImmRef(ComplexType),
+    MutRef(ComplexType),
+}
+
+pub struct FunctionSummary {
+    params: Vec<TypeClosureItem>,
+    ret_ty: Vec<TypeClosureItem>,
+}
+
 /// A driver generator that also caches information during driver generation
 pub struct DriverGenerator<'a> {
+    // information registry
     datatype_registry: &'a DatatypeRegistry,
     function_registry: &'a FunctionRegistry,
+
+    // configs
     type_recursion_depth: usize,
+
+    // stateful variables
+    function_summaries: BTreeMap<FunctionInst, FunctionSummary>,
+    datatype_providers: BTreeMap<ComplexItem, BTreeMap<FunctionInst, BTreeSet<usize>>>,
+    datatype_consumers: BTreeMap<ComplexItem, BTreeMap<FunctionInst, BTreeSet<usize>>>,
 }
 
 impl<'a> DriverGenerator<'a> {
@@ -297,6 +320,9 @@ impl<'a> DriverGenerator<'a> {
             datatype_registry,
             function_registry,
             type_recursion_depth,
+            function_summaries: BTreeMap::new(),
+            datatype_providers: BTreeMap::new(),
+            datatype_consumers: BTreeMap::new(),
         }
     }
 
@@ -333,10 +359,9 @@ impl<'a> DriverGenerator<'a> {
         result
     }
 
-    /// Generate drivers (zero to multiple) for an entrypoint instance
-    fn generate_drivers_for_inst(&mut self, decl: &FunctionDecl, inst: &FunctionInst) {
+    /// Analyze the function instantiation and update the stateful variables
+    fn analyze_function_inst(&mut self, decl: &FunctionDecl, inst: FunctionInst) {
         debug_assert_eq!(decl.ident, inst.ident);
-        log::debug!("deriving script for {inst}");
 
         // further instantiate parameter and return types
         let params: Vec<_> = decl
@@ -359,13 +384,67 @@ impl<'a> DriverGenerator<'a> {
                 )
             })
             .collect();
+
+        // check if this function consumes and provides any datatypes
+        for (i, item) in params.iter().enumerate() {
+            let key = match item {
+                TypeClosureItem::Base(TypeClosureBase::Simple(_))
+                | TypeClosureItem::ImmRef(TypeClosureBase::Simple(_))
+                | TypeClosureItem::MutRef(TypeClosureBase::Simple(_)) => continue,
+                TypeClosureItem::Base(TypeClosureBase::Complex(t)) => ComplexItem::Base(t.clone()),
+                TypeClosureItem::ImmRef(TypeClosureBase::Complex(t)) => {
+                    ComplexItem::ImmRef(t.clone())
+                },
+                TypeClosureItem::MutRef(TypeClosureBase::Complex(t)) => {
+                    ComplexItem::MutRef(t.clone())
+                },
+            };
+
+            let inserted = self
+                .datatype_consumers
+                .entry(key)
+                .or_default()
+                .entry(inst.clone())
+                .or_default()
+                .insert(i);
+            assert!(inserted);
+        }
+        for (i, item) in ret_ty.iter().enumerate() {
+            let key = match item {
+                TypeClosureItem::Base(TypeClosureBase::Simple(_))
+                | TypeClosureItem::ImmRef(TypeClosureBase::Simple(_))
+                | TypeClosureItem::MutRef(TypeClosureBase::Simple(_)) => continue,
+                TypeClosureItem::Base(TypeClosureBase::Complex(t)) => ComplexItem::Base(t.clone()),
+                TypeClosureItem::ImmRef(TypeClosureBase::Complex(t)) => {
+                    ComplexItem::ImmRef(t.clone())
+                },
+                TypeClosureItem::MutRef(TypeClosureBase::Complex(t)) => {
+                    ComplexItem::MutRef(t.clone())
+                },
+            };
+
+            let inserted = self
+                .datatype_providers
+                .entry(key)
+                .or_default()
+                .entry(inst.clone())
+                .or_default()
+                .insert(i);
+            assert!(inserted);
+        }
+
+        // register the summary
+        let existing = self
+            .function_summaries
+            .insert(inst, FunctionSummary { params, ret_ty });
+        assert!(existing.is_none());
     }
 
     /// Generate drivers (zero to multiple) for an entrypoint declaration
-    pub fn generate_drivers_for_decl(&mut self, decl: &FunctionDecl) {
+    pub fn generate_drivers(&mut self, decl: &FunctionDecl) {
         // derive instantiations
         for inst in self.collect_function_insts(decl) {
-            self.generate_drivers_for_inst(decl, &inst);
+            self.analyze_function_inst(decl, inst);
         }
     }
 }
