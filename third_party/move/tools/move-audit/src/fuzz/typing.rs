@@ -9,7 +9,7 @@ use move_core_types::account_address::AccountAddress;
 use std::{collections::BTreeMap, fmt::Display};
 
 /// Variants of vector implementation
-#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub enum VectorVariant {
     Vector,
     BigVector,
@@ -51,7 +51,7 @@ const VECTOR_VARIANTS: &[VectorVariant] = &[
 ];
 
 /// Variants of map implementation
-#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub enum MapVariant {
     Table,
     TableWithLength,
