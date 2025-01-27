@@ -5,10 +5,7 @@ use crate::fuzz::{
 };
 use itertools::Itertools;
 use move_binary_format::file_format::AbilitySet;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt::Display,
-};
+use std::fmt::Display;
 
 /// Instantiation of a function
 #[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
@@ -282,16 +279,200 @@ impl From<TypeItem> for TypeClosureItem {
     }
 }
 
-#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
-pub enum ComplexItem {
-    Base(ComplexType),
-    ImmRef(ComplexType),
-    MutRef(ComplexType),
+/// Types that can be argument of driver function
+#[derive(Debug, Clone)]
+pub enum BasicType {
+    Bool,
+    U8,
+    U16,
+    U32,
+    U64,
+    U128,
+    U256,
+    String,
+    Address,
+    Signer,
+    Vector(Box<Self>),
 }
 
-pub struct FunctionSummary {
-    params: Vec<TypeClosureItem>,
-    ret_ty: Vec<TypeClosureItem>,
+impl BasicType {
+    pub fn with_depth(self, depth: usize) -> Self {
+        assert!(!matches!(self, Self::Vector(_)));
+        if depth == 0 {
+            return self;
+        }
+        Self::Vector(self.with_depth(depth - 1).into())
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+enum DriverVariable {
+    Param(usize),
+    Local(usize),
+}
+
+#[derive(Debug, Clone)]
+enum DriverStatement {
+    Call {
+        function: FunctionInst,
+        arguments: Vec<DriverVariable>,
+        ret_binds: Vec<Option<usize>>,
+    },
+    ImmBorrow {
+        src: DriverVariable,
+        dst: usize,
+    },
+    MutBorrow {
+        src: DriverVariable,
+        dst: usize,
+    },
+    Deref {
+        src: DriverVariable,
+        dst: usize,
+    },
+
+    // the following is only expected to be used as argument bridges
+    Arg2Bitvec {
+        src: DriverVariable,
+        depth: usize,
+        dst: usize,
+    },
+    Arg2SmartVec {
+        src: DriverVariable,
+        depth: usize,
+        dst: usize,
+    },
+    Arg2Map {
+        src_key: DriverVariable,
+        src_value: DriverVariable,
+        depth: usize,
+        variant: MapVariant,
+        dst: usize,
+    },
+    Arg2Object {
+        src: DriverVariable,
+        ident: DatatypeIdent,
+        type_args: Vec<TypeBase>,
+        depth: usize,
+        dst: usize,
+    },
+}
+
+/// A data structure that holds the details on how to generate a driver
+#[derive(Debug, Clone)]
+struct DriverCanvas {
+    parameters: Vec<BasicType>,
+    statements: Vec<DriverStatement>,
+    local_var_count: usize,
+}
+
+impl DriverCanvas {
+    /// Create a new index for a local variable
+    fn new_local(&mut self) -> usize {
+        let index = self.local_var_count;
+        self.local_var_count += 1;
+        index
+    }
+
+    /// Add a new param
+    fn new_param(&mut self, base: BasicType, depth: usize) -> DriverVariable {
+        let index = self.parameters.len();
+        self.parameters.push(base.with_depth(depth));
+        DriverVariable::Param(index)
+    }
+
+    /// Register parameters for an input type
+    pub fn add_input_simple_recursive(&mut self, t: &SimpleType, depth: usize) -> DriverVariable {
+        match t {
+            SimpleType::Bool => self.new_param(BasicType::Bool, depth),
+            SimpleType::U8 => self.new_param(BasicType::U8, depth),
+            SimpleType::U16 => self.new_param(BasicType::U16, depth),
+            SimpleType::U32 => self.new_param(BasicType::U32, depth),
+            SimpleType::U64 => self.new_param(BasicType::U64, depth),
+            SimpleType::U128 => self.new_param(BasicType::U128, depth),
+            SimpleType::U256 => self.new_param(BasicType::U256, depth),
+            SimpleType::Bitvec => {
+                let param = self.new_param(BasicType::Bool, depth + 1);
+                let dst_index = self.new_local();
+                self.statements.push(DriverStatement::Arg2Bitvec {
+                    src: param,
+                    depth,
+                    dst: dst_index,
+                });
+                DriverVariable::Local(dst_index)
+            },
+            SimpleType::String => self.new_param(BasicType::String, depth),
+            SimpleType::Address => self.new_param(BasicType::Address, depth),
+            SimpleType::Signer => self.new_param(BasicType::Signer, depth),
+            SimpleType::Vector { element, variant } => match variant {
+                VectorVariant::Vector => self.add_input_simple_recursive(element, depth + 1),
+                VectorVariant::BigVector => panic!("there is no way to construct a BigVector"),
+                VectorVariant::SmartVector => {
+                    let var = self.add_input_simple_recursive(element, depth + 1);
+                    let dst_index = self.new_local();
+                    self.statements.push(DriverStatement::Arg2SmartVec {
+                        src: var,
+                        depth,
+                        dst: dst_index,
+                    });
+                    DriverVariable::Local(dst_index)
+                },
+            },
+            SimpleType::Map {
+                key,
+                value,
+                variant,
+            } => {
+                let var_k = self.add_input_simple_recursive(key, depth + 1);
+                let var_v = self.add_input_simple_recursive(value, depth + 1);
+                let dst_index = self.new_local();
+                self.statements.push(DriverStatement::Arg2Map {
+                    src_key: var_k,
+                    src_value: var_v,
+                    depth,
+                    variant: *variant,
+                    dst: dst_index,
+                });
+                DriverVariable::Local(dst_index)
+            },
+            SimpleType::Object {
+                ident,
+                type_args,
+                abilities: _,
+            } => {
+                let param = self.new_param(BasicType::Address, depth);
+                let dst_index = self.new_local();
+                self.statements.push(DriverStatement::Arg2Object {
+                    src: param,
+                    ident: ident.clone(),
+                    type_args: type_args.clone(),
+                    depth,
+                    dst: dst_index,
+                });
+                DriverVariable::Local(dst_index)
+            },
+        }
+    }
+
+    /// Create an immutable borrow statement
+    pub fn new_stmt_imm_borrow(&mut self, src: DriverVariable) -> DriverVariable {
+        let dst_index = self.new_local();
+        self.statements.push(DriverStatement::ImmBorrow {
+            src,
+            dst: dst_index,
+        });
+        DriverVariable::Local(dst_index)
+    }
+
+    /// Create a mutable borrow statement
+    pub fn new_stmt_mut_borrow(&mut self, src: DriverVariable) -> DriverVariable {
+        let dst_index = self.new_local();
+        self.statements.push(DriverStatement::MutBorrow {
+            src,
+            dst: dst_index,
+        });
+        DriverVariable::Local(dst_index)
+    }
 }
 
 /// A driver generator that also caches information during driver generation
@@ -302,11 +483,6 @@ pub struct DriverGenerator<'a> {
 
     // configs
     type_recursion_depth: usize,
-
-    // stateful variables
-    function_summaries: BTreeMap<FunctionInst, FunctionSummary>,
-    datatype_providers: BTreeMap<ComplexItem, BTreeMap<FunctionInst, BTreeSet<usize>>>,
-    datatype_consumers: BTreeMap<ComplexItem, BTreeMap<FunctionInst, BTreeSet<usize>>>,
 }
 
 impl<'a> DriverGenerator<'a> {
@@ -320,9 +496,6 @@ impl<'a> DriverGenerator<'a> {
             datatype_registry,
             function_registry,
             type_recursion_depth,
-            function_summaries: BTreeMap::new(),
-            datatype_providers: BTreeMap::new(),
-            datatype_consumers: BTreeMap::new(),
         }
     }
 
@@ -385,59 +558,87 @@ impl<'a> DriverGenerator<'a> {
             })
             .collect();
 
-        // check if this function consumes and provides any datatypes
-        for (i, item) in params.iter().enumerate() {
-            let key = match item {
-                TypeClosureItem::Base(TypeClosureBase::Simple(_))
-                | TypeClosureItem::ImmRef(TypeClosureBase::Simple(_))
-                | TypeClosureItem::MutRef(TypeClosureBase::Simple(_)) => continue,
-                TypeClosureItem::Base(TypeClosureBase::Complex(t)) => ComplexItem::Base(t.clone()),
+        // initialize the base canvas
+        let mut canvas = DriverCanvas {
+            parameters: vec![],
+            statements: vec![],
+            local_var_count: 0,
+        };
+
+        // prepare the arguments
+        for item in &params {
+            match item {
+                TypeClosureItem::Base(TypeClosureBase::Simple(t)) => {
+                    canvas.add_input_simple_recursive(t, 0);
+                },
+                TypeClosureItem::ImmRef(TypeClosureBase::Simple(t)) => {
+                    let var = canvas.add_input_simple_recursive(t, 0);
+                    canvas.new_stmt_imm_borrow(var);
+                },
+                TypeClosureItem::MutRef(TypeClosureBase::Simple(t)) => {
+                    let var = canvas.add_input_simple_recursive(t, 0);
+                    canvas.new_stmt_mut_borrow(var);
+                },
+                TypeClosureItem::Base(TypeClosureBase::Complex(t)) => {
+                    // search for a provider
+                    self.probe_providers_complex(t);
+
+                    // TODO: if type is copy-able, we can also search for refs
+                    log::info!("function {inst} requires {}", TypeBase::from(t.clone()));
+                },
                 TypeClosureItem::ImmRef(TypeClosureBase::Complex(t)) => {
-                    ComplexItem::ImmRef(t.clone())
+                    // TODO
+                    log::info!("function {inst} requires &{}", TypeBase::from(t.clone()));
                 },
                 TypeClosureItem::MutRef(TypeClosureBase::Complex(t)) => {
-                    ComplexItem::MutRef(t.clone())
+                    // TODO
+                    log::info!(
+                        "function {inst} requires &mut {}",
+                        TypeBase::from(t.clone())
+                    );
                 },
-            };
-
-            let inserted = self
-                .datatype_consumers
-                .entry(key)
-                .or_default()
-                .entry(inst.clone())
-                .or_default()
-                .insert(i);
-            assert!(inserted);
+            }
         }
+
         for (i, item) in ret_ty.iter().enumerate() {
-            let key = match item {
+            match item {
                 TypeClosureItem::Base(TypeClosureBase::Simple(_))
-                | TypeClosureItem::ImmRef(TypeClosureBase::Simple(_))
-                | TypeClosureItem::MutRef(TypeClosureBase::Simple(_)) => continue,
-                TypeClosureItem::Base(TypeClosureBase::Complex(t)) => ComplexItem::Base(t.clone()),
-                TypeClosureItem::ImmRef(TypeClosureBase::Complex(t)) => {
-                    ComplexItem::ImmRef(t.clone())
+                | TypeClosureItem::ImmRef(_)
+                | TypeClosureItem::MutRef(_) => continue,
+                TypeClosureItem::Base(TypeClosureBase::Complex(t)) => {
+                    // TODO
+                    let t = TypeBase::from(t.clone());
+                    if t.abilities().has_drop() {
+                        continue;
+                    }
+                    log::info!("function {inst} needs to deposit {t}",);
                 },
-                TypeClosureItem::MutRef(TypeClosureBase::Complex(t)) => {
-                    ComplexItem::MutRef(t.clone())
-                },
-            };
-
-            let inserted = self
-                .datatype_providers
-                .entry(key)
-                .or_default()
-                .entry(inst.clone())
-                .or_default()
-                .insert(i);
-            assert!(inserted);
+            }
         }
+    }
 
-        // register the summary
-        let existing = self
-            .function_summaries
-            .insert(inst, FunctionSummary { params, ret_ty });
-        assert!(existing.is_none());
+    fn probe_providers_complex_unit(
+        &mut self,
+        ident: &DatatypeIdent,
+        type_args: &[TypeBase],
+        abilities: AbilitySet,
+    ) {
+    }
+
+    fn probe_providers_complex(&mut self, datatype: &ComplexType) {
+        // TODO: check if we have cached it
+
+        // construct the providers case by case
+        match datatype {
+            ComplexType::Unit {
+                ident,
+                type_args,
+                abilities,
+            } => {
+                self.probe_providers_complex_unit(ident, type_args, *abilities);
+            },
+            _ => todo!(),
+        }
     }
 
     /// Generate drivers (zero to multiple) for an entrypoint declaration
