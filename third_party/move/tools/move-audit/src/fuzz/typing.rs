@@ -420,6 +420,151 @@ impl Display for TypeItem {
     }
 }
 
+/// Type unifier
+pub struct TypeUnifier<'a> {
+    generics: &'a [AbilitySet],
+    unified: Vec<Option<TypeBase>>,
+}
+
+impl<'a> TypeUnifier<'a> {
+    /// Initialize a type unification context
+    pub fn new(generics: &'a [AbilitySet]) -> Self {
+        Self {
+            generics,
+            unified: vec![None; generics.len()],
+        }
+    }
+
+    fn check_or_unify_param(&mut self, param: usize, ty: TypeBase) -> bool {
+        assert!(0 <= param && param < self.generics.len());
+        if !ty.abilities().is_subset(self.generics[param]) {
+            return false;
+        }
+        match self.unified.get(param).unwrap() {
+            None => {
+                self.unified.insert(param, Some(ty));
+                true
+            },
+            Some(existing) => existing == &ty,
+        }
+    }
+
+    /// Try to unify a type tag and a type base
+    pub fn unify(&mut self, ty_tag: &TypeTag, ty_base: &TypeBase) -> bool {
+        match (ty_tag, ty_base) {
+            (TypeTag::Bool, TypeBase::Bool)
+            | (TypeTag::U8, TypeBase::U8)
+            | (TypeTag::U16, TypeBase::U16)
+            | (TypeTag::U32, TypeBase::U32)
+            | (TypeTag::U64, TypeBase::U64)
+            | (TypeTag::U128, TypeBase::U128)
+            | (TypeTag::U256, TypeBase::U256)
+            | (TypeTag::Bitvec, TypeBase::Bitvec)
+            | (TypeTag::String, TypeBase::String)
+            | (TypeTag::Address, TypeBase::Address)
+            | (TypeTag::Signer, TypeBase::Signer) => true,
+            (
+                TypeTag::Vector {
+                    element: element_tag,
+                    variant: variant_tag,
+                },
+                TypeBase::Vector {
+                    element: element_base,
+                    variant: variant_base,
+                },
+            ) => {
+                if variant_tag != variant_base {
+                    return false;
+                }
+                self.unify(element_tag, element_base)
+            },
+            (
+                TypeTag::Map {
+                    key: key_tag,
+                    value: value_tag,
+                    variant: variant_tag,
+                },
+                TypeBase::Map {
+                    key: key_base,
+                    value: value_base,
+                    variant: variant_base,
+                },
+            ) => {
+                if variant_tag != variant_base {
+                    return false;
+                }
+                self.unify(key_tag, key_base) && self.unify(value_tag, value_base)
+            },
+            (
+                TypeTag::Datatype {
+                    ident: ident_tag,
+                    type_args: type_args_tag,
+                },
+                TypeBase::Datatype {
+                    ident: ident_base,
+                    type_args: type_args_base,
+                    abilities: _,
+                },
+            )
+            | (
+                TypeTag::ObjectKnown {
+                    ident: ident_tag,
+                    type_args: type_args_tag,
+                },
+                TypeBase::Object {
+                    ident: ident_base,
+                    type_args: type_args_base,
+                    abilities: _,
+                },
+            ) => {
+                if ident_tag != ident_base {
+                    return false;
+                }
+                assert_eq!(type_args_tag.len(), type_args_base.len());
+                for (sub_tag, sub_base) in type_args_tag.iter().zip(type_args_base.iter()) {
+                    if !self.unify(sub_tag, sub_base) {
+                        return false;
+                    }
+                }
+                true
+            },
+            (TypeTag::Param(param), _) => self.check_or_unify_param(*param, ty_base.clone()),
+            (
+                TypeTag::ObjectParam(param),
+                TypeBase::Object {
+                    ident,
+                    type_args,
+                    abilities,
+                },
+            ) => {
+                let datatype_base = TypeBase::Datatype {
+                    ident: ident.clone(),
+                    type_args: type_args.clone(),
+                    abilities: *abilities,
+                };
+                self.check_or_unify_param(*param, datatype_base)
+            },
+            _ => false,
+        }
+    }
+
+    /// Try to unify a series of (type_tag, type_base) pairs
+    pub fn unify_all(&mut self, ty_tags: &[TypeTag], ty_bases: &[TypeBase]) -> bool {
+        assert_eq!(ty_tags.len(), ty_bases.len());
+        for (ty_tag, ty_base) in ty_tags.iter().zip(ty_bases.iter()) {
+            if !self.unify(ty_tag, ty_base) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Finish and return the type unification result
+    pub fn finish(self) -> Vec<Option<TypeBase>> {
+        self.unified
+    }
+}
+
 /// A registry of datatypes
 pub struct DatatypeRegistry {
     decls: BTreeMap<DatatypeIdent, DatatypeDecl>,
