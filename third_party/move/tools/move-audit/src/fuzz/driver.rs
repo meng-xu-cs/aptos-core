@@ -308,26 +308,6 @@ impl BasicType {
     }
 }
 
-/// Provider for a complex type
-enum ComplexTypeProvider {
-    Call {
-        ident: FunctionIdent,
-        type_args: Vec<Option<TypeBase>>,
-        ret_index: usize,
-    },
-    Deref {
-        provider: Box<ComplexTypeProvider>,
-    },
-}
-
-enum ComplexTypeCtor {
-    Direct,
-    Vector {
-        ctor: Box<Self>,
-        variant: VectorVariant,
-    },
-}
-
 #[derive(Debug, Copy, Clone)]
 enum DriverVariable {
     Param(usize),
@@ -640,131 +620,8 @@ impl<'a> DriverGenerator<'a> {
         }
     }
 
-    fn may_construct_complex_unit(
-        unifier: &mut TypeUnifier,
-        tag: &TypeTag,
-        target_ident: &DatatypeIdent,
-        target_type_args: &[TypeBase],
-    ) -> Option<ComplexTypeCtor> {
-        let getter = match tag {
-            TypeTag::Bool
-            | TypeTag::U8
-            | TypeTag::U16
-            | TypeTag::U32
-            | TypeTag::U64
-            | TypeTag::U128
-            | TypeTag::U256
-            | TypeTag::Bitvec
-            | TypeTag::String
-            | TypeTag::Address
-            | TypeTag::Signer
-            | TypeTag::ObjectKnown { .. }
-            | TypeTag::ObjectParam(_) => return None,
-            TypeTag::Datatype { ident, type_args } => {
-                if ident != target_ident {
-                    return None;
-                }
-                if !unifier.unify_all(type_args, target_type_args) {
-                    return None;
-                }
-                ComplexTypeCtor::Direct
-            },
-            TypeTag::Vector { element, variant } => {
-                let element_ctor = Self::may_construct_complex_unit(
-                    unifier,
-                    element,
-                    target_ident,
-                    target_type_args,
-                )?;
-                ComplexTypeCtor::Vector {
-                    ctor: element_ctor.into(),
-                    variant: *variant,
-                }
-            },
-            TypeTag::Map {
-                key,
-                value,
-                variant,
-            } => {
-                let key_ctor =
-                    Self::may_construct_complex_unit(unifier, key, target_ident, target_type_args);
-                let value_ctor = Self::may_construct_complex_unit(
-                    unifier,
-                    value,
-                    target_ident,
-                    target_type_args,
-                );
-            },
-        };
-        Some(getter)
-    }
-
-    fn probe_providers_complex_unit(
-        &self,
-        target_ident: &DatatypeIdent,
-        target_type_args: &[TypeBase],
-        target_abilities: AbilitySet,
-    ) {
-        for decl in self.function_registry.iter_decls() {
-            for (ret_index, retv) in decl.return_sig.iter().enumerate() {
-                let (tag, need_deref) = match retv {
-                    TypeRef::Base(t) => (t, false),
-                    TypeRef::ImmRef(t) | TypeRef::MutRef(t) => {
-                        if !target_abilities.has_copy() {
-                            continue;
-                        }
-                        (t, true)
-                    },
-                };
-
-                let provider = match tag {
-                    TypeTag::Datatype { ident, type_args } => {
-                        if ident != target_ident {
-                            continue;
-                        }
-                        let mut unifier = TypeUnifier::new(&decl.generics);
-                        if !unifier.unify_all(type_args, target_type_args) {
-                            continue;
-                        }
-
-                        // type unified, now record the operation
-                        let base_provider = ComplexTypeProvider::Call {
-                            ident: decl.ident.clone(),
-                            type_args: unifier.finish(),
-                            ret_index,
-                        };
-                        if need_deref {
-                            ComplexTypeProvider::Deref {
-                                provider: base_provider.into(),
-                            }
-                        } else {
-                            base_provider
-                        }
-                    },
-                    TypeTag::Vector { element, variant } => {},
-                    TypeTag::Map { .. } => {},
-                    _ => continue,
-                };
-            }
-        }
-    }
-
     fn probe_providers_complex(&mut self, datatype: &ComplexType) {
         // TODO: check if we have cached it
-
-        // construct the providers case by case
-        match datatype {
-            ComplexType::Unit {
-                ident,
-                type_args,
-                abilities,
-            } => {
-                self.probe_providers_complex_unit(ident, type_args, *abilities);
-            },
-            _ => {
-                // TODO: but for now, do nothing
-            },
-        }
     }
 
     /// Generate drivers (zero to multiple) for an entrypoint declaration
