@@ -11,11 +11,11 @@ use move_binary_format::{
     access::{ModuleAccess, ScriptAccess},
     binary_views::BinaryIndexedView,
     file_format::{
-        AbilitySet, CompiledModule, CompiledScript, FunctionDefinition, SignatureToken,
-        StructDefinition, Visibility,
+        CompiledModule, CompiledScript, FunctionDefinition, SignatureToken, StructDefinition,
+        Visibility,
     },
 };
-use move_core_types::account_address::AccountAddress;
+use move_core_types::{ability::AbilitySet, account_address::AccountAddress};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
