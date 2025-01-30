@@ -1,11 +1,10 @@
 use crate::fuzz::ident::DatatypeIdent;
 use itertools::Itertools;
-use move_binary_format::{
-    access::ModuleAccess,
-    file_format::{Ability, AbilitySet, SignatureToken},
-    CompiledModule,
+use move_binary_format::{access::ModuleAccess, file_format::SignatureToken, CompiledModule};
+use move_core_types::{
+    ability::{Ability, AbilitySet},
+    account_address::AccountAddress,
 };
-use move_core_types::account_address::AccountAddress;
 use std::{collections::BTreeMap, fmt::Display};
 
 /// Variants of vector implementation
@@ -739,6 +738,9 @@ impl DatatypeRegistry {
                 TypeRef::MutRef(inner_tag)
             },
             SignatureToken::TypeParameter(idx) => TypeRef::Base(TypeTag::Param(*idx as usize)),
+            SignatureToken::Function(..) => {
+                todo!("signature token of the `function` type is not supported yet")
+            },
         }
     }
 

@@ -7,7 +7,7 @@ use crate::fuzz::{
     },
 };
 use itertools::Itertools;
-use move_binary_format::file_format::AbilitySet;
+use move_core_types::ability::AbilitySet;
 use std::fmt::Display;
 
 /// Instantiation of a function

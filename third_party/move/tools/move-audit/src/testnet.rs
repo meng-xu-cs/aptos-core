@@ -7,9 +7,9 @@ use anyhow::{anyhow, bail, Result};
 use aptos_crypto::{ed25519::Ed25519PrivateKey, HashValue, PrivateKey, Uniform};
 use aptos_types::transaction::authenticator::AuthenticationKey;
 use log::{debug, error, info};
-use move_binary_format::{access::ModuleAccess, file_format::AbilitySet, CompiledModule};
+use move_binary_format::{access::ModuleAccess, CompiledModule};
 use move_compiler::compiled_unit::CompiledUnit;
-use move_core_types::account_address::AccountAddress;
+use move_core_types::{ability::AbilitySet, account_address::AccountAddress};
 use move_package::{
     compilation::compiled_package::{CompiledPackage, CompiledUnitWithSource},
     source_package::manifest_parser::parse_move_manifest_from_file,

@@ -2,11 +2,8 @@ use crate::fuzz::{
     ident::FunctionIdent,
     typing::{DatatypeRegistry, TypeRef},
 };
-use move_binary_format::{
-    access::ModuleAccess,
-    file_format::{AbilitySet, Visibility},
-    CompiledModule,
-};
+use move_binary_format::{access::ModuleAccess, file_format::Visibility, CompiledModule};
+use move_core_types::ability::AbilitySet;
 use std::collections::BTreeMap;
 
 /// Declaration of a function
