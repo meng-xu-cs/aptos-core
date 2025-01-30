@@ -6,11 +6,9 @@ use aptos_types::{
     account_address::create_resource_address, transaction::authenticator::AuthenticationKey,
 };
 use move_binary_format::{
-    binary_views::BinaryIndexedView,
-    file_format::{AbilitySet, SignatureToken},
-    file_format_common,
+    binary_views::BinaryIndexedView, file_format::SignatureToken, file_format_common,
 };
-use move_core_types::{account_address::AccountAddress, u256};
+use move_core_types::{ability::AbilitySet, account_address::AccountAddress, u256};
 use move_model::metadata::{CompilerVersion, LanguageVersion};
 use move_package::CompilerConfig;
 use std::{collections::BTreeMap, process::Command, str::FromStr};
@@ -203,7 +201,8 @@ impl TxnArgTypeWithRef {
             | SignatureToken::Address
             | SignatureToken::Signer
             | SignatureToken::Reference(_)
-            | SignatureToken::MutableReference(_) => true,
+            | SignatureToken::MutableReference(_)
+            | SignatureToken::Function(..) => true,
             SignatureToken::Struct(idx) | SignatureToken::StructInstantiation(idx, _) => {
                 let handle = binary.struct_handle_at(*idx);
                 handle.abilities.has_drop()
