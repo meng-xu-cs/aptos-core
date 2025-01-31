@@ -8,7 +8,7 @@ use crate::fuzz::{
 };
 use itertools::Itertools;
 use move_core_types::ability::AbilitySet;
-use std::fmt::Display;
+use std::{collections::BTreeMap, fmt::Display};
 
 /// Instantiation of a function
 #[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
@@ -486,6 +486,9 @@ pub struct DriverGenerator<'a> {
 
     // configs
     type_recursion_depth: usize,
+
+    // canvas for entrypoint functions
+    canvas_mapping: BTreeMap<FunctionInst, DriverCanvas>,
 }
 
 impl<'a> DriverGenerator<'a> {
@@ -499,11 +502,12 @@ impl<'a> DriverGenerator<'a> {
             datatype_registry,
             function_registry,
             type_recursion_depth,
+            canvas_mapping: BTreeMap::new(),
         }
     }
 
     /// Collect possible function instantiations
-    fn collect_function_insts(&self, decl: &FunctionDecl) -> Vec<FunctionInst> {
+    pub fn collect_function_insts(&self, decl: &FunctionDecl) -> Vec<FunctionInst> {
         let mut result = vec![];
 
         // shortcut when this function is not a generic function
@@ -535,8 +539,13 @@ impl<'a> DriverGenerator<'a> {
         result
     }
 
+    /// Check if an instantiation has been analyzed
+    pub fn has_function_inst(&self, inst: &FunctionInst) -> bool {
+        self.canvas_mapping.contains_key(inst)
+    }
+
     /// Analyze the function instantiation and update the stateful variables
-    fn analyze_function_inst(&mut self, decl: &FunctionDecl, inst: FunctionInst) {
+    pub fn analyze_function_inst(&mut self, decl: &FunctionDecl, inst: &FunctionInst) -> bool {
         debug_assert_eq!(decl.ident, inst.ident);
 
         // further instantiate parameter and return types
@@ -568,7 +577,7 @@ impl<'a> DriverGenerator<'a> {
             local_var_count: 0,
         };
 
-        // prepare the arguments
+        // prepare canvas for the arguments
         for item in &params {
             match item {
                 TypeClosureItem::Base(TypeClosureBase::Simple(t)) => {
@@ -583,31 +592,32 @@ impl<'a> DriverGenerator<'a> {
                     canvas.new_stmt_mut_borrow(var);
                 },
                 TypeClosureItem::Base(TypeClosureBase::Complex(t)) => {
-                    // search for a provider
-                    self.probe_providers_complex(t);
-
                     // TODO: if type is copy-able, we can also search for refs
-                    log::info!("function {inst} requires {}", TypeBase::from(t.clone()));
+                    // log::info!("function {inst} requires {}", TypeBase::from(t.clone()));
+
+                    // search for a provider
+                    match self.probe_providers_complex(t) {
+                        None => return false,
+                        Some(()) => (),
+                    }
                 },
                 TypeClosureItem::ImmRef(TypeClosureBase::Complex(t)) => {
                     // TODO
-                    log::info!("function {inst} requires &{}", TypeBase::from(t.clone()));
+                    // log::info!("function {inst} requires &{}", TypeBase::from(t.clone()));
+                    return false;
                 },
                 TypeClosureItem::MutRef(TypeClosureBase::Complex(t)) => {
                     // TODO
-                    log::info!(
-                        "function {inst} requires &mut {}",
-                        TypeBase::from(t.clone())
-                    );
+                    // log::info!("function {inst} requires &mut {}",TypeBase::from(t.clone()));
+                    return false;
                 },
             }
         }
 
+        // see which datatype this function can provide
         for (i, item) in ret_ty.iter().enumerate() {
             match item {
-                TypeClosureItem::Base(TypeClosureBase::Simple(_))
-                | TypeClosureItem::ImmRef(_)
-                | TypeClosureItem::MutRef(_) => continue,
+                TypeClosureItem::Base(TypeClosureBase::Simple(_)) => continue,
                 TypeClosureItem::Base(TypeClosureBase::Complex(t)) => {
                     // TODO
                     let t = TypeBase::from(t.clone());
@@ -616,19 +626,21 @@ impl<'a> DriverGenerator<'a> {
                     }
                     log::info!("function {inst} needs to deposit {t}",);
                 },
+                TypeClosureItem::ImmRef(_) | TypeClosureItem::MutRef(_) => {
+                    // TODO
+                    continue;
+                },
             }
         }
+
+        // done with the analysis
+        let existing = self.canvas_mapping.insert(inst.clone(), canvas);
+        assert!(existing.is_none());
+        true
     }
 
-    fn probe_providers_complex(&mut self, datatype: &ComplexType) {
+    fn probe_providers_complex(&mut self, datatype: &ComplexType) -> Option<()> {
         // TODO: check if we have cached it
-    }
-
-    /// Generate drivers (zero to multiple) for an entrypoint declaration
-    pub fn generate_drivers(&mut self, decl: &FunctionDecl) {
-        // derive instantiations
-        for inst in self.collect_function_insts(decl) {
-            self.analyze_function_inst(decl, inst);
-        }
+        None
     }
 }

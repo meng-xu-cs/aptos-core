@@ -7,6 +7,7 @@ use move_core_types::ability::AbilitySet;
 use std::collections::BTreeMap;
 
 /// Declaration of a function
+#[derive(Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct FunctionDecl {
     pub ident: FunctionIdent,
     pub generics: Vec<AbilitySet>,
