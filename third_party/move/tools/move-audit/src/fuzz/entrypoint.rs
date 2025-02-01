@@ -1,10 +1,11 @@
 use crate::fuzz::{
     ident::FunctionIdent,
-    typing::{DatatypeRegistry, TypeRef},
+    typing::{DatatypeRegistry, TypeBase, TypeRef},
 };
+use itertools::Itertools;
 use move_binary_format::{access::ModuleAccess, file_format::Visibility, CompiledModule};
 use move_core_types::ability::AbilitySet;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt::Display};
 
 /// Declaration of a function
 #[derive(Clone, Ord, PartialOrd, Eq, PartialEq)]
@@ -75,5 +76,23 @@ impl FunctionRegistry {
     /// Return an iterator for all declarations collected
     pub fn iter_decls(&self) -> impl Iterator<Item = &FunctionDecl> {
         self.decls.values()
+    }
+}
+
+/// Instantiation of a function
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
+pub struct FunctionInst {
+    pub ident: FunctionIdent,
+    pub type_args: Vec<TypeBase>,
+}
+
+impl Display for FunctionInst {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.type_args.is_empty() {
+            write!(f, "{}", self.ident)
+        } else {
+            let inst = self.type_args.iter().join(", ");
+            write!(f, "{}<{inst}>", self.ident)
+        }
     }
 }
