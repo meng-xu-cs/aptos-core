@@ -435,7 +435,7 @@ impl<'a> TypeUnifier<'a> {
     }
 
     fn check_or_unify_param(&mut self, param: usize, ty: TypeBase) -> bool {
-        assert!(0 <= param && param < self.generics.len());
+        assert!(param < self.generics.len());
         if !ty.abilities().is_subset(self.generics[param]) {
             return false;
         }
@@ -791,7 +791,7 @@ impl DatatypeRegistry {
             for inst in self.type_bases_by_ability_constraint(element_constraint, depth - 1) {
                 result.push(TypeBase::Vector {
                     element: inst.into(),
-                    variant: variant.clone(),
+                    variant: *variant,
                 });
             }
         }
@@ -816,7 +816,7 @@ impl DatatypeRegistry {
                     result.push(TypeBase::Map {
                         key: ty_key.clone().into(),
                         value: ty_value.clone().into(),
-                        variant: variant.clone(),
+                        variant: *variant,
                     })
                 }
             }
@@ -907,7 +907,7 @@ impl DatatypeRegistry {
             TypeTag::Signer => TypeBase::Signer,
             TypeTag::Vector { element, variant } => TypeBase::Vector {
                 element: self.instantiate_type_tag(element, ty_args).into(),
-                variant: variant.clone(),
+                variant: *variant,
             },
             TypeTag::Map {
                 key,
@@ -916,7 +916,7 @@ impl DatatypeRegistry {
             } => TypeBase::Map {
                 key: self.instantiate_type_tag(key, ty_args).into(),
                 value: self.instantiate_type_tag(value, ty_args).into(),
-                variant: variant.clone(),
+                variant: *variant,
             },
             TypeTag::Datatype { ident, type_args } => {
                 let decl = self.decls.get(ident).expect("valid datatype ident only");
