@@ -355,7 +355,7 @@ impl DriverCanvas {
             local_var_count: 0,
         }
     }
-    
+
     /// Create a new index for a local variable
     fn new_local(&mut self) -> usize {
         let index = self.local_var_count;
