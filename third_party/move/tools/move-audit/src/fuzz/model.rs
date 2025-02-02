@@ -1,24 +1,81 @@
 use crate::{
     common::PkgDefinition,
     fuzz::{
-        canvas::{TypeClosureBase, TypeClosureItem},
+        canvas::{ComplexType, SimpleType, TypeClosureBase, TypeClosureItem},
         driver::DriverGenerator,
         entrypoint::{FunctionDecl, FunctionInst, FunctionRegistry},
-        typing::DatatypeRegistry,
+        typing::{DatatypeRegistry, MapVariant, TypeBase, VectorVariant},
     },
 };
 use itertools::Itertools;
 use move_compiler::compiled_unit::CompiledUnit;
 use move_package::compilation::compiled_package::CompiledUnitWithSource;
-use std::collections::BTreeSet;
+use petgraph::graph::{DiGraph, NodeIndex};
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
+enum DatatypeItem {
+    Base(ComplexType),
+    ImmRef(ComplexType),
+    MutRef(ComplexType),
+}
+
+enum DPGNode {
+    Function(FunctionInst),
+    Datatype(DatatypeItem),
+}
+
+enum DPGEdge {
+    Use(usize),
+    Def(usize),
+    VectorToElement {
+        variant: VectorVariant,
+    },
+    ElementToVector {
+        variant: VectorVariant,
+    },
+    MapToKey {
+        variant: MapVariant,
+    },
+    KeyToMapSimple {
+        value: SimpleType,
+        variant: MapVariant,
+    },
+    KeyToMapComplex {
+        value: NodeIndex,
+        variant: MapVariant,
+    },
+    MapToValue {
+        variant: MapVariant,
+    },
+    ValueToMapSimple {
+        key: SimpleType,
+        variant: MapVariant,
+    },
+    ValueToMapComplex {
+        key: NodeIndex,
+        variant: MapVariant,
+    },
+    Deref,
+    ImmBorrow,
+    MutBorrow,
+}
 
 /// A database that holds information we can statically get from the packages
-pub struct Model {}
+pub struct Model {
+    datatype_provider_graph: DiGraph<DPGNode, DPGEdge>,
+    datatype_item_to_node_id: BTreeMap<DatatypeItem, NodeIndex>,
+    function_inst_to_node_id: BTreeMap<FunctionInst, NodeIndex>,
+}
 
 impl Model {
     /// Initialize the model to an empty state
     pub fn new() -> Self {
-        Self {}
+        Self {
+            datatype_provider_graph: DiGraph::new(),
+            datatype_item_to_node_id: BTreeMap::new(),
+            function_inst_to_node_id: BTreeMap::new(),
+        }
     }
 
     /// Analyze a closure of packages
@@ -62,18 +119,11 @@ impl Model {
         }
 
         // collect instantiations of entrypoint functions
-        let mut primary_entrypoint_instantiations = BTreeSet::new();
         for decl in function_registry.iter_decls() {
-            if !decl.is_primary {
-                continue;
-            }
-
             for inst in
                 collect_function_instantiations(&datatype_registry, decl, type_recursion_depth)
             {
-                self.analyze_function_instantiation(&datatype_registry, decl, &inst);
-                let inserted = primary_entrypoint_instantiations.insert(inst);
-                assert!(inserted);
+                self.analyze_function_instantiation(&datatype_registry, decl, inst);
             }
         }
 
@@ -81,13 +131,130 @@ impl Model {
         let mut generator = DriverGenerator::new(&datatype_registry, &function_registry);
     }
 
+    fn analyze_datatype_item(&mut self, item: DatatypeItem) -> NodeIndex {
+        match self.datatype_item_to_node_id.get(&item) {
+            None => {},
+            Some(index) => return *index,
+        }
+
+        let index = self
+            .datatype_provider_graph
+            .add_node(DPGNode::Datatype(item.clone()));
+        self.datatype_item_to_node_id.insert(item.clone(), index);
+
+        // now analyze this item
+        match item {
+            DatatypeItem::Base(t) => match t {
+                ComplexType::Unit { .. } => (),
+                ComplexType::Vector { element, variant } => {
+                    let element_index = self.analyze_datatype_item(DatatypeItem::Base(*element));
+                    self.datatype_provider_graph.add_edge(
+                        index,
+                        element_index,
+                        DPGEdge::VectorToElement { variant },
+                    );
+                    self.datatype_provider_graph.add_edge(
+                        element_index,
+                        index,
+                        DPGEdge::ElementToVector { variant },
+                    );
+                },
+                ComplexType::MapOnKey {
+                    key,
+                    value,
+                    variant,
+                } => {
+                    let key_index = self.analyze_datatype_item(DatatypeItem::Base(*key));
+                    self.datatype_provider_graph
+                        .add_edge(index, key_index, DPGEdge::MapToKey { variant });
+                    self.datatype_provider_graph.add_edge(
+                        key_index,
+                        index,
+                        DPGEdge::KeyToMapSimple { value, variant },
+                    );
+                },
+                ComplexType::MapOnValue {
+                    key,
+                    value,
+                    variant,
+                } => {
+                    let value_index = self.analyze_datatype_item(DatatypeItem::Base(*value));
+                    self.datatype_provider_graph.add_edge(
+                        index,
+                        value_index,
+                        DPGEdge::MapToValue { variant },
+                    );
+                    self.datatype_provider_graph.add_edge(
+                        value_index,
+                        index,
+                        DPGEdge::ValueToMapSimple { key, variant },
+                    );
+                },
+                ComplexType::MapOnBoth {
+                    key,
+                    value,
+                    variant,
+                } => {
+                    let key_index = self.analyze_datatype_item(DatatypeItem::Base(*key));
+                    let value_index = self.analyze_datatype_item(DatatypeItem::Base(*value));
+                    self.datatype_provider_graph
+                        .add_edge(index, key_index, DPGEdge::MapToKey { variant });
+                    self.datatype_provider_graph.add_edge(
+                        index,
+                        value_index,
+                        DPGEdge::MapToValue { variant },
+                    );
+                    self.datatype_provider_graph.add_edge(
+                        key_index,
+                        index,
+                        DPGEdge::KeyToMapComplex {
+                            value: value_index,
+                            variant,
+                        },
+                    );
+                    self.datatype_provider_graph.add_edge(
+                        value_index,
+                        index,
+                        DPGEdge::ValueToMapComplex {
+                            key: key_index,
+                            variant,
+                        },
+                    );
+                },
+            },
+            DatatypeItem::ImmRef(t) => {
+                let abilities = TypeBase::from(t.clone()).abilities();
+                let base_index = self.analyze_datatype_item(DatatypeItem::Base(t));
+                self.datatype_provider_graph
+                    .add_edge(base_index, index, DPGEdge::ImmBorrow);
+                if abilities.has_copy() {
+                    self.datatype_provider_graph
+                        .add_edge(index, base_index, DPGEdge::Deref);
+                }
+            },
+            DatatypeItem::MutRef(t) => {
+                let abilities = TypeBase::from(t.clone()).abilities();
+                let base_index = self.analyze_datatype_item(DatatypeItem::Base(t));
+                self.datatype_provider_graph
+                    .add_edge(base_index, index, DPGEdge::MutBorrow);
+                if abilities.has_copy() {
+                    self.datatype_provider_graph
+                        .add_edge(index, base_index, DPGEdge::Deref);
+                }
+            },
+        }
+
+        // done with the analysis
+        index
+    }
+
     fn analyze_function_instantiation(
         &mut self,
         datatype_registry: &DatatypeRegistry,
         decl: &FunctionDecl,
-        inst: &FunctionInst,
+        inst: FunctionInst,
     ) {
-        debug_assert_eq!(decl.ident, inst.ident);
+        assert_eq!(decl.ident, inst.ident);
 
         // instantiate parameter and return types
         let params: Vec<_> = decl
@@ -105,25 +272,50 @@ impl Model {
             })
             .collect();
 
-        // prepare canvas for the arguments
-        for item in &params {
-            match item {
+        // create a new node that represent this function instantiation
+        let node_index = self
+            .datatype_provider_graph
+            .add_node(DPGNode::Function(inst.clone()));
+        let existing = self.function_inst_to_node_id.insert(inst, node_index);
+        assert!(existing.is_none());
+
+        // populate edges in the graph
+        for (i, item) in params.iter().enumerate() {
+            let item_index = match item {
                 TypeClosureItem::Base(TypeClosureBase::Simple(_))
                 | TypeClosureItem::ImmRef(TypeClosureBase::Simple(_))
-                | TypeClosureItem::MutRef(TypeClosureBase::Simple(_)) => (),
+                | TypeClosureItem::MutRef(TypeClosureBase::Simple(_)) => continue,
                 TypeClosureItem::Base(TypeClosureBase::Complex(t)) => {
-                    // TODO: if type is copy-able, we can also search for refs
-                    // log::info!("function {inst} requires {}", TypeBase::from(t.clone()));
+                    self.analyze_datatype_item(DatatypeItem::Base(t.clone()))
                 },
                 TypeClosureItem::ImmRef(TypeClosureBase::Complex(t)) => {
-                    // TODO
-                    // log::info!("function {inst} requires &{}", TypeBase::from(t.clone()));
+                    self.analyze_datatype_item(DatatypeItem::ImmRef(t.clone()))
                 },
                 TypeClosureItem::MutRef(TypeClosureBase::Complex(t)) => {
-                    // TODO
-                    // log::info!("function {inst} requires &mut {}",TypeBase::from(t.clone()));
+                    self.analyze_datatype_item(DatatypeItem::MutRef(t.clone()))
                 },
-            }
+            };
+            self.datatype_provider_graph
+                .add_edge(item_index, node_index, DPGEdge::Use(i));
+        }
+
+        for (i, item) in ret_ty.iter().enumerate() {
+            let item_index = match item {
+                TypeClosureItem::Base(TypeClosureBase::Simple(_))
+                | TypeClosureItem::ImmRef(TypeClosureBase::Simple(_))
+                | TypeClosureItem::MutRef(TypeClosureBase::Simple(_)) => continue,
+                TypeClosureItem::Base(TypeClosureBase::Complex(t)) => {
+                    self.analyze_datatype_item(DatatypeItem::Base(t.clone()))
+                },
+                TypeClosureItem::ImmRef(TypeClosureBase::Complex(t)) => {
+                    self.analyze_datatype_item(DatatypeItem::ImmRef(t.clone()))
+                },
+                TypeClosureItem::MutRef(TypeClosureBase::Complex(t)) => {
+                    self.analyze_datatype_item(DatatypeItem::MutRef(t.clone()))
+                },
+            };
+            self.datatype_provider_graph
+                .add_edge(node_index, item_index, DPGEdge::Def(i));
         }
     }
 }
