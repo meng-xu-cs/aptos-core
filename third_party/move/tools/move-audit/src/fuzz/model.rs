@@ -4,7 +4,7 @@ use crate::{
         canvas::{ComplexType, SimpleType, TypeClosureBase, TypeClosureItem},
         driver::DriverGenerator,
         entrypoint::{FunctionDecl, FunctionInst, FunctionRegistry},
-        typing::{DatatypeRegistry, MapVariant, TypeBase, VectorVariant},
+        typing::{DatatypeRegistry, MapVariant, TypeBase, TypeItem, VectorVariant},
     },
 };
 use itertools::Itertools;
@@ -18,6 +18,16 @@ enum DatatypeItem {
     Base(ComplexType),
     ImmRef(ComplexType),
     MutRef(ComplexType),
+}
+
+impl From<DatatypeItem> for TypeItem {
+    fn from(value: DatatypeItem) -> Self {
+        match value {
+            DatatypeItem::Base(t) => TypeItem::Base(t.into()),
+            DatatypeItem::ImmRef(t) => TypeItem::ImmRef(t.into()),
+            DatatypeItem::MutRef(t) => TypeItem::MutRef(t.into()),
+        }
+    }
 }
 
 enum DPGNode {
@@ -120,9 +130,10 @@ impl Model {
 
         // collect instantiations of entrypoint functions
         for decl in function_registry.iter_decls() {
-            for inst in
-                collect_function_instantiations(&datatype_registry, decl, type_recursion_depth)
-            {
+            let insts =
+                collect_function_instantiations(&datatype_registry, decl, type_recursion_depth);
+            for inst in insts {
+                log::debug!("analyzing function instantiation {inst}");
                 self.analyze_function_instantiation(&datatype_registry, decl, inst);
             }
         }
@@ -136,6 +147,7 @@ impl Model {
             None => {},
             Some(index) => return *index,
         }
+        log::debug!("analyzing datatype item {}", TypeItem::from(item.clone()));
 
         let index = self
             .datatype_provider_graph
