@@ -3,7 +3,7 @@ use crate::{
     fuzz::{
         canvas::{ComplexType, SimpleType, TypeClosureBase, TypeClosureItem},
         driver::DriverGenerator,
-        entrypoint::{FunctionDecl, FunctionInst, FunctionRegistry},
+        function::{FunctionDecl, FunctionInst, FunctionRegistry},
         typing::{DatatypeRegistry, MapVariant, TypeBase, TypeItem, VectorVariant},
     },
 };
