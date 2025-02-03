@@ -1,6 +1,6 @@
 use crate::fuzz::{
     canvas::{ComplexType, DriverCanvas, TypeClosureBase, TypeClosureItem},
-    entrypoint::{FunctionDecl, FunctionInst, FunctionRegistry},
+    function::{FunctionDecl, FunctionInst, FunctionRegistry},
     typing::{DatatypeRegistry, TypeBase, TypeItem, TypeUnifier, VectorVariant},
 };
 use std::collections::BTreeMap;
