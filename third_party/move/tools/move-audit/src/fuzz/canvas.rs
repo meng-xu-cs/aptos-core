@@ -1,5 +1,5 @@
 use crate::fuzz::{
-    entrypoint::FunctionInst,
+    function::FunctionInst,
     ident::DatatypeIdent,
     typing::{MapVariant, TypeBase, TypeItem, VectorVariant},
 };
