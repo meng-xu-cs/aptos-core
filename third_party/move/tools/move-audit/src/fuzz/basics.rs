@@ -8,7 +8,7 @@ use crate::{
 use move_binary_format::{
     access::{ModuleAccess, ScriptAccess},
     binary_views::BinaryIndexedView,
-    file_format::Signature,
+    file_format::{Signature, Visibility},
 };
 use move_compiler::compiled_unit::CompiledUnit;
 use move_core_types::value::MoveTypeLayout;
@@ -18,7 +18,8 @@ use std::{collections::BTreeMap, fmt::Display};
 /// An identifier to an entrypoint to the contracts
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
 pub enum EntrypointIdent {
-    Function(FunctionIdent),
+    EntryFunction(FunctionIdent),
+    PublicFunction(FunctionIdent),
     Script(String),
 }
 
@@ -26,7 +27,7 @@ impl Display for EntrypointIdent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Script(ident) => ident.fmt(f),
-            Self::Function(ident) => ident.fmt(f),
+            Self::EntryFunction(ident) | Self::PublicFunction(ident) => ident.fmt(f),
         }
     }
 }
@@ -109,11 +110,20 @@ impl Preparer {
                         // NOTE: assuming no generic types for simplification
                         // TODO: remove this simplification
                         assert!(script.type_parameters.is_empty());
-                        let params = Self::convert_entry_parameters(
+
+                        let mut params = vec![];
+                        for (ty_base, ty_runtime) in Self::convert_signature(
                             &datatype_registry,
                             &binary,
                             script.signature_at(script.parameters),
-                        );
+                        ) {
+                            // sanity check
+                            assert!(
+                                matches!(ty_base, TypeBase::Signer)
+                                    || ty_base.abilities().has_copy()
+                            );
+                            params.push(ty_runtime);
+                        }
 
                         // register to mapping
                         let existing = entrypoints.insert(ident, EntrypointDetails { params });
@@ -124,15 +134,13 @@ impl Preparer {
                         let module = &module.module;
                         let binary = BinaryIndexedView::Module(module);
                         for def in &module.function_defs {
-                            // we only care about entry functions
-                            if !def.is_entry {
+                            // we only care about public functions
+                            if !matches!(def.visibility, Visibility::Public) {
                                 continue;
                             }
 
                             let handle = binary.function_handle_at(def.function);
-                            let ident = EntrypointIdent::Function(
-                                FunctionIdent::from_function_handle(&binary, handle),
-                            );
+                            let ident = FunctionIdent::from_function_handle(&binary, handle);
 
                             // NOTE: assuming no generic types for simplification
                             // TODO: remove this simplification
@@ -141,14 +149,64 @@ impl Preparer {
                                 continue;
                             }
 
-                            assert!(handle.type_parameters.is_empty());
-                            let params = Self::convert_entry_parameters(
+                            // check parameters
+                            let mut should_skip = false;
+                            let mut params = vec![];
+                            for (ty_base, ty_runtime) in Self::convert_signature(
                                 &datatype_registry,
                                 &binary,
                                 module.signature_at(handle.parameters),
-                            );
+                            ) {
+                                if !ty_base.abilities().has_copy()
+                                    && !matches!(ty_base, TypeBase::Signer)
+                                {
+                                    assert!(!def.is_entry);
+                                    // NOTE: skip functions that take non-trivial arguments
+                                    // TODO: remove this simplification
+                                    should_skip = true;
+                                    break;
+                                }
+                                params.push(ty_runtime);
+                            }
+
+                            if should_skip {
+                                log::warn!(
+                                    "skipping entrypoint {ident} due to non-trivial arguments"
+                                );
+                                continue;
+                            }
+
+                            // sanity check on entry functions
+                            let ret_ty = binary.signature_at(handle.return_);
+                            if def.is_entry {
+                                assert!(ret_ty.0.is_empty());
+                            } else {
+                                for token in ret_ty.0.iter() {
+                                    let ty_ref =
+                                        datatype_registry.convert_signature_token(&binary, token);
+
+                                    // TODO: assumed no type arguments above for simplicity
+                                    let ty_base =
+                                        datatype_registry.instantiate_type_ref(&ty_ref, &[]);
+                                    if !ty_base.abilities().has_drop() {
+                                        should_skip = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if should_skip {
+                                log::warn!(
+                                    "skipping entrypoint {ident} due to non-trivial return value"
+                                );
+                                continue;
+                            }
 
                             // register to mapping
+                            let ident = if def.is_entry {
+                                EntrypointIdent::EntryFunction(ident)
+                            } else {
+                                EntrypointIdent::PublicFunction(ident)
+                            };
                             let existing = entrypoints.insert(ident, EntrypointDetails { params });
                             assert!(existing.is_none());
                         }
@@ -157,14 +215,15 @@ impl Preparer {
             }
         }
 
+        log::info!("entrypoints discovered: {}", entrypoints.len());
         Self { entrypoints }
     }
 
-    fn convert_entry_parameters(
+    fn convert_signature(
         registry: &DatatypeRegistry,
         binary: &BinaryIndexedView,
         params: &Signature,
-    ) -> Vec<RuntimeType> {
+    ) -> Vec<(TypeBase, RuntimeType)> {
         let mut param_types = vec![];
         for token in params.0.iter() {
             let ty_tag = match registry.convert_signature_token(binary, token) {
@@ -175,19 +234,13 @@ impl Preparer {
 
             // TODO: assumed no type arguments above for simplicity
             let ty_base = registry.instantiate_type_tag(&ty_tag, &[]);
-
-            // NOTE: this is a check available to parameter type in entry function only
-            assert!(matches!(ty_base, TypeBase::Signer) || ty_base.abilities().has_copy());
-
-            // convert to runtime type
-            param_types.push(Self::convert_entry_type_base(registry, ty_base));
+            let ty_runtime = Self::convert_type_base(registry, &ty_base);
+            param_types.push((ty_base, ty_runtime));
         }
-
-        // done
         param_types
     }
 
-    fn convert_entry_type_base(registry: &DatatypeRegistry, ty_base: TypeBase) -> RuntimeType {
+    fn convert_type_base(registry: &DatatypeRegistry, ty_base: &TypeBase) -> RuntimeType {
         match ty_base {
             TypeBase::Bool => RuntimeType::Bool,
             TypeBase::U8 => RuntimeType::U8,
@@ -201,14 +254,12 @@ impl Preparer {
             TypeBase::Address => RuntimeType::Address,
             TypeBase::Signer => RuntimeType::Signer,
             TypeBase::Option { element } => {
-                RuntimeType::Option(Self::convert_entry_type_base(registry, *element).into())
+                RuntimeType::Option(Self::convert_type_base(registry, element).into())
             },
             TypeBase::Vector { element, variant } => {
                 // TODO: we do not assume other vector types to appear as entry parameter
                 assert!(matches!(variant, VectorVariant::Vector));
-                RuntimeType::Vector(Box::new(
-                    Self::convert_entry_type_base(registry, *element).into(),
-                ))
+                RuntimeType::Vector(Self::convert_type_base(registry, element).into())
             },
             TypeBase::Map { .. } => {
                 // TODO: we do not assume map types to appear as entry parameter
@@ -227,9 +278,9 @@ impl Preparer {
                         let tys: Vec<_> = fields
                             .iter()
                             .map(|t| {
-                                Self::convert_entry_type_base(
+                                Self::convert_type_base(
                                     registry,
-                                    registry.instantiate_type_tag(t, &type_args),
+                                    &registry.instantiate_type_tag(t, type_args),
                                 )
                             })
                             .collect();
@@ -241,9 +292,9 @@ impl Preparer {
                             fields
                                 .iter()
                                 .map(|t| {
-                                    Self::convert_entry_type_base(
+                                    Self::convert_type_base(
                                         registry,
-                                        registry.instantiate_type_tag(t, &type_args),
+                                        &registry.instantiate_type_tag(t, type_args),
                                     )
                                 })
                                 .collect()
@@ -256,7 +307,7 @@ impl Preparer {
                 ident,
                 type_args,
                 abilities: _,
-            } => RuntimeType::Object(ident, type_args),
+            } => RuntimeType::Object(ident.clone(), type_args.clone()),
         }
     }
 }
