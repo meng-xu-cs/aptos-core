@@ -3,7 +3,9 @@ use crate::fuzz::{
     typing::{DatatypeRegistry, TypeBase, TypeRef},
 };
 use itertools::Itertools;
-use move_binary_format::{access::ModuleAccess, file_format::Visibility, CompiledModule};
+use move_binary_format::{
+    binary_views::BinaryIndexedView, file_format::Visibility, CompiledModule,
+};
 use move_core_types::ability::AbilitySet;
 use std::{collections::BTreeMap, fmt::Display};
 
@@ -36,6 +38,8 @@ impl FunctionRegistry {
         module: &CompiledModule,
         is_primary: bool,
     ) {
+        let binary = BinaryIndexedView::Module(module);
+
         // go over all functions defined
         for def in &module.function_defs {
             // we only care about public functions
@@ -43,21 +47,21 @@ impl FunctionRegistry {
                 continue;
             }
 
-            let handle = module.function_handle_at(def.function);
-            let ident = FunctionIdent::from_function_handle(module, handle);
+            let handle = binary.function_handle_at(def.function);
+            let ident = FunctionIdent::from_function_handle(&binary, handle);
 
             // parse parameters and return types
-            let parameters = module
+            let parameters = binary
                 .signature_at(handle.parameters)
                 .0
                 .iter()
-                .map(|token| typing.convert_signature_token(module, token))
+                .map(|token| typing.convert_signature_token(&binary, token))
                 .collect();
-            let return_sig = module
+            let return_sig = binary
                 .signature_at(handle.return_)
                 .0
                 .iter()
-                .map(|token| typing.convert_signature_token(module, token))
+                .map(|token| typing.convert_signature_token(&binary, token))
                 .collect();
 
             // add the declaration
