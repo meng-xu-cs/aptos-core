@@ -1,6 +1,10 @@
 use crate::fuzz::ident::DatatypeIdent;
 use itertools::Itertools;
-use move_binary_format::{access::ModuleAccess, file_format::SignatureToken, CompiledModule};
+use move_binary_format::{
+    binary_views::BinaryIndexedView,
+    file_format::{SignatureToken, StructFieldInformation},
+    CompiledModule,
+};
 use move_core_types::{
     ability::{Ability, AbilitySet},
     account_address::AccountAddress,
@@ -134,6 +138,9 @@ pub enum TypeTag {
     String,
     Address,
     Signer,
+    Option {
+        element: Box<Self>,
+    },
     Vector {
         element: Box<Self>,
         variant: VectorVariant,
@@ -169,6 +176,7 @@ impl Display for TypeTag {
             Self::String => write!(f, "std::string::String"),
             Self::Address => write!(f, "address"),
             Self::Signer => write!(f, "signer"),
+            Self::Option { element } => write!(f, "std::option::Option<{element}>"),
             Self::Vector { variant, element } => write!(f, "{variant}<{element}>"),
             Self::Map {
                 variant,
@@ -219,6 +227,7 @@ impl Display for TypeRef {
 pub enum IntrinsicType {
     Bitvec,
     String,
+    Option,
     Vector(VectorVariant),
     Map(MapVariant),
     Object,
@@ -232,6 +241,7 @@ impl IntrinsicType {
         let parsed = match (ident.module_name(), ident.datatype_name()) {
             ("bit_vector", "BitVector") => IntrinsicType::Bitvec,
             ("string", "String") => IntrinsicType::String,
+            ("option", "Option") => IntrinsicType::Option,
             ("big_vector", "BigVector") => IntrinsicType::Vector(VectorVariant::BigVector),
             ("smart_vector", "SmartVector") => IntrinsicType::Vector(VectorVariant::SmartVector),
             ("table", "Table") => IntrinsicType::Map(MapVariant::Table),
@@ -257,6 +267,12 @@ pub struct DatatypeDecl {
     pub is_primary: bool,
 }
 
+/// Content of a datatype
+pub enum DatatypeContent {
+    Fields(Vec<TypeTag>),
+    Variants(BTreeMap<String, Vec<TypeTag>>),
+}
+
 /// A type instance with concrete execution semantics
 #[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub enum TypeBase {
@@ -271,6 +287,9 @@ pub enum TypeBase {
     String,
     Address,
     Signer,
+    Option {
+        element: Box<Self>,
+    },
     Vector {
         element: Box<Self>,
         variant: VectorVariant,
@@ -308,6 +327,17 @@ impl TypeBase {
             | Self::Address
             | Self::Object { .. } => AbilitySet::PRIMITIVES,
             Self::Signer => AbilitySet::SIGNER,
+            Self::Option { element } => {
+                let mut actual_abilities = AbilitySet::EMPTY;
+                let provided_abilities = element.abilities();
+                for ability in AbilitySet::VECTOR {
+                    let required = ability.requires();
+                    if provided_abilities.has_ability(required) {
+                        actual_abilities = actual_abilities | ability;
+                    }
+                }
+                actual_abilities
+            },
             Self::Vector { element, variant } => {
                 let mut actual_abilities = AbilitySet::EMPTY;
                 let provided_abilities = element.abilities();
@@ -357,6 +387,7 @@ impl Display for TypeBase {
             Self::String => write!(f, "std::string::String"),
             Self::Address => write!(f, "address"),
             Self::Signer => write!(f, "signer"),
+            Self::Option { element } => write!(f, "std::option::Option<{element}>"),
             Self::Vector { variant, element } => write!(f, "{variant}<{element}>"),
             Self::Map {
                 variant,
@@ -567,6 +598,7 @@ impl<'a> TypeUnifier<'a> {
 /// A registry of datatypes
 pub struct DatatypeRegistry {
     decls: BTreeMap<DatatypeIdent, DatatypeDecl>,
+    contents: BTreeMap<DatatypeIdent, DatatypeContent>,
 }
 
 impl DatatypeRegistry {
@@ -574,22 +606,25 @@ impl DatatypeRegistry {
     pub fn new() -> Self {
         Self {
             decls: BTreeMap::new(),
+            contents: BTreeMap::new(),
         }
     }
 
     /// Analyze a module and register datatypes found in this module
     pub fn analyze(&mut self, module: &CompiledModule, is_primary: bool) {
-        // go over all structs defined
+        let binary = BinaryIndexedView::Module(module);
+
+        // pass 1: register declarations
         for def in &module.struct_defs {
-            let handle = module.struct_handle_at(def.struct_handle);
-            let ident = DatatypeIdent::from_struct_handle(module, handle);
+            let handle = binary.struct_handle_at(def.struct_handle);
+            let ident = DatatypeIdent::from_struct_handle(&binary, handle);
 
             // skip intrinsic types
             if IntrinsicType::try_parse_ident(&ident).is_some() {
                 continue;
             }
 
-            // add the declaration
+            // register the declaration
             let decl = DatatypeDecl {
                 ident: ident.clone(),
                 generics: handle
@@ -603,12 +638,99 @@ impl DatatypeRegistry {
             let existing = self.decls.insert(ident, decl);
             assert!(existing.is_none());
         }
+
+        // pass 2: fill in content
+        for def in &module.struct_defs {
+            let handle = binary.struct_handle_at(def.struct_handle);
+            let ident = DatatypeIdent::from_struct_handle(&binary, handle);
+
+            // skip intrinsic types
+            if IntrinsicType::try_parse_ident(&ident).is_some() {
+                continue;
+            }
+
+            // parse the content
+            let content = match &def.field_information {
+                StructFieldInformation::Native => panic!("unexpected native datatype {ident}"),
+                StructFieldInformation::Declared(fields) => {
+                    let mut field_types = vec![];
+                    for field_def in fields.iter() {
+                        let tag =
+                            match self.convert_signature_token(&binary, &field_def.signature.0) {
+                                TypeRef::Base(tag) => tag,
+                                TypeRef::ImmRef(_) | TypeRef::MutRef(_) => {
+                                    panic!("unexpected reference type as struct field");
+                                },
+                            };
+                        field_types.push(tag);
+                    }
+                    DatatypeContent::Fields(field_types)
+                },
+                StructFieldInformation::DeclaredVariants(variants) => {
+                    let mut variant_table = BTreeMap::new();
+                    for variant_def in variants {
+                        let key = binary.identifier_at(variant_def.name).to_string();
+                        let mut field_types = vec![];
+                        for field_def in variant_def.fields.iter() {
+                            let tag = match self
+                                .convert_signature_token(&binary, &field_def.signature.0)
+                            {
+                                TypeRef::Base(tag) => tag,
+                                TypeRef::ImmRef(_) | TypeRef::MutRef(_) => {
+                                    panic!("unexpected reference type as enum variant");
+                                },
+                            };
+                            field_types.push(tag);
+                        }
+                        let existing = variant_table.insert(key, field_types);
+                        assert!(existing.is_none());
+                    }
+                    DatatypeContent::Variants(variant_table)
+                },
+            };
+
+            // register the content
+            let existing = self.contents.insert(ident, content);
+            assert!(existing.is_none());
+        }
+
+        // sanity check
+        assert_eq!(self.decls.len(), self.contents.len());
+        self.decls
+            .keys()
+            .zip(self.contents.keys())
+            .for_each(|(ident_decl, ident_content)| assert_eq!(ident_decl, ident_content));
     }
+
+    /// Lookup a datatype declaration
+    pub fn lookup_decl(&self, ident: &DatatypeIdent) -> &DatatypeDecl {
+        self.decls
+            .get(ident)
+            .unwrap_or_else(|| panic!("unregistered datatype {ident}"))
+    }
+
+    /// Lookup a datatype declaration
+    pub fn lookup_decl_and_content(
+        &self,
+        ident: &DatatypeIdent,
+    ) -> (&DatatypeDecl, &DatatypeContent) {
+        let decl = self
+            .decls
+            .get(ident)
+            .unwrap_or_else(|| panic!("unregistered datatype {ident}"));
+        let content = self
+            .contents
+            .get(ident)
+            .unwrap_or_else(|| panic!("unregistered datatype {ident}"));
+        (decl, content)
+    }
+
+    /// Lookup a
 
     /// Convert a signature token
     pub fn convert_signature_token(
         &self,
-        module: &CompiledModule,
+        binary: &BinaryIndexedView,
         token: &SignatureToken,
     ) -> TypeRef {
         match token {
@@ -622,7 +744,7 @@ impl DatatypeRegistry {
             SignatureToken::Address => TypeRef::Base(TypeTag::Address),
             SignatureToken::Signer => TypeRef::Base(TypeTag::Signer),
             SignatureToken::Vector(element) => {
-                let element_tag = match self.convert_signature_token(module, element) {
+                let element_tag = match self.convert_signature_token(binary, element) {
                     TypeRef::Base(tag) => tag,
                     TypeRef::ImmRef(_) | TypeRef::MutRef(_) => {
                         panic!("reference type as vector element is not expected");
@@ -634,24 +756,22 @@ impl DatatypeRegistry {
                 })
             },
             SignatureToken::Struct(idx) => {
-                let handle = module.struct_handle_at(*idx);
-                let ident = DatatypeIdent::from_struct_handle(module, handle);
+                let handle = binary.struct_handle_at(*idx);
+                let ident = DatatypeIdent::from_struct_handle(binary, handle);
 
                 // first try to see if this is an intrinsic type
                 match IntrinsicType::try_parse_ident(&ident) {
                     Some(IntrinsicType::Bitvec) => TypeRef::Base(TypeTag::Bitvec),
                     Some(IntrinsicType::String) => TypeRef::Base(TypeTag::String),
-                    Some(IntrinsicType::Vector(_))
+                    Some(IntrinsicType::Option)
+                    | Some(IntrinsicType::Vector(_))
                     | Some(IntrinsicType::Map(_))
                     | Some(IntrinsicType::Object) => {
                         panic!("parameterized intrinsic type is not expected to be `SignatureToken::Struct`");
                     },
                     None => {
                         // not an intrinsic type, locate the datatype
-                        let decl = self
-                            .decls
-                            .get(&ident)
-                            .unwrap_or_else(|| panic!("unregistered datatype {ident}"));
+                        let decl = self.lookup_decl(&ident);
                         assert!(decl.generics.is_empty());
                         TypeRef::Base(TypeTag::Datatype {
                             ident,
@@ -661,13 +781,13 @@ impl DatatypeRegistry {
                 }
             },
             SignatureToken::StructInstantiation(idx, inst) => {
-                let handle = module.struct_handle_at(*idx);
-                let ident = DatatypeIdent::from_struct_handle(module, handle);
+                let handle = binary.struct_handle_at(*idx);
+                let ident = DatatypeIdent::from_struct_handle(binary, handle);
 
                 // convert the type arguments
                 let mut ty_args: Vec<_> = inst
                     .iter()
-                    .map(|t| match self.convert_signature_token(module, t) {
+                    .map(|t| match self.convert_signature_token(binary, t) {
                         TypeRef::Base(tag) => tag,
                         TypeRef::ImmRef(_) | TypeRef::MutRef(_) => {
                             panic!("reference type as datatype instantiation is not expected");
@@ -679,6 +799,12 @@ impl DatatypeRegistry {
                 match IntrinsicType::try_parse_ident(&ident) {
                     Some(IntrinsicType::Bitvec) | Some(IntrinsicType::String) => {
                         panic!("basic intrinsic type is not expected to be `SignatureToken::StructInstantiation`");
+                    },
+                    Some(IntrinsicType::Option) => {
+                        assert_eq!(ty_args.len(), 1);
+                        TypeRef::Base(TypeTag::Option {
+                            element: ty_args.pop().unwrap().into(),
+                        })
                     },
                     Some(IntrinsicType::Vector(variant)) => {
                         assert_eq!(ty_args.len(), 1);
@@ -707,10 +833,7 @@ impl DatatypeRegistry {
                     },
                     None => {
                         // not an intrinsic type, locate the datatype
-                        let decl = self
-                            .decls
-                            .get(&ident)
-                            .unwrap_or_else(|| panic!("unregistered datatype {ident}"));
+                        let decl = self.lookup_decl(&ident);
                         assert_eq!(decl.generics.len(), ty_args.len());
                         TypeRef::Base(TypeTag::Datatype {
                             ident,
@@ -720,7 +843,7 @@ impl DatatypeRegistry {
                 }
             },
             SignatureToken::Reference(inner) => {
-                let inner_tag = match self.convert_signature_token(module, inner) {
+                let inner_tag = match self.convert_signature_token(binary, inner) {
                     TypeRef::Base(tag) => tag,
                     TypeRef::ImmRef(_) | TypeRef::MutRef(_) => {
                         panic!("reference type behind immutable borrow is not expected");
@@ -729,7 +852,7 @@ impl DatatypeRegistry {
                 TypeRef::ImmRef(inner_tag)
             },
             SignatureToken::MutableReference(inner) => {
-                let inner_tag = match self.convert_signature_token(module, inner) {
+                let inner_tag = match self.convert_signature_token(binary, inner) {
                     TypeRef::Base(tag) => tag,
                     TypeRef::ImmRef(_) | TypeRef::MutRef(_) => {
                         panic!("reference type behind mutable borrow is not expected");
@@ -777,6 +900,17 @@ impl DatatypeRegistry {
         }
         if constraint.is_subset(AbilitySet::SIGNER) {
             result.push(TypeBase::Signer);
+        }
+
+        // optional
+        if constraint.is_subset(AbilitySet::VECTOR) {
+            // derive the baseline constraint for type instantiations
+            let element_constraint = constraint.requires();
+            for inst in self.type_bases_by_ability_constraint(element_constraint, depth - 1) {
+                result.push(TypeBase::Option {
+                    element: inst.into(),
+                });
+            }
         }
 
         // collections
@@ -905,6 +1039,9 @@ impl DatatypeRegistry {
             TypeTag::String => TypeBase::String,
             TypeTag::Address => TypeBase::Address,
             TypeTag::Signer => TypeBase::Signer,
+            TypeTag::Option { element } => TypeBase::Option {
+                element: self.instantiate_type_tag(element, ty_args).into(),
+            },
             TypeTag::Vector { element, variant } => TypeBase::Vector {
                 element: self.instantiate_type_tag(element, ty_args).into(),
                 variant: *variant,
@@ -919,7 +1056,7 @@ impl DatatypeRegistry {
                 variant: *variant,
             },
             TypeTag::Datatype { ident, type_args } => {
-                let decl = self.decls.get(ident).expect("valid datatype ident only");
+                let decl = self.lookup_decl(ident);
                 debug_assert_eq!(type_args.len(), decl.generics.len());
 
                 if type_args.is_empty() {
@@ -946,7 +1083,7 @@ impl DatatypeRegistry {
                 .expect("type arguments in bound")
                 .clone(),
             TypeTag::ObjectKnown { ident, type_args } => {
-                let decl = self.decls.get(ident).expect("valid datatype ident only");
+                let decl = self.lookup_decl(ident);
                 debug_assert_eq!(type_args.len(), decl.generics.len());
 
                 if type_args.is_empty() {

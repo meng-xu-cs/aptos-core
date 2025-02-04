@@ -1,7 +1,6 @@
 use move_binary_format::{
-    access::ModuleAccess,
+    binary_views::BinaryIndexedView,
     file_format::{FunctionHandle, ModuleHandle, StructHandle},
-    CompiledModule,
 };
 use move_core_types::{account_address::AccountAddress, identifier::Identifier};
 use std::fmt::Display;
@@ -15,10 +14,10 @@ pub struct ModuleIdent {
 
 impl ModuleIdent {
     /// Utility conversion from the corresponding handle in file_format
-    pub fn from_module_handle(module: &CompiledModule, handle: &ModuleHandle) -> Self {
+    pub fn from_module_handle(binary: &BinaryIndexedView, handle: &ModuleHandle) -> Self {
         Self {
-            address: *module.address_identifier_at(handle.address),
-            name: module.identifier_at(handle.name).to_owned(),
+            address: *binary.address_identifier_at(handle.address),
+            name: binary.identifier_at(handle.name).to_owned(),
         }
     }
 }
@@ -38,10 +37,10 @@ pub struct DatatypeIdent {
 
 impl DatatypeIdent {
     /// Utility conversion from the corresponding handle in file_format
-    pub fn from_struct_handle(module: &CompiledModule, handle: &StructHandle) -> Self {
+    pub fn from_struct_handle(binary: &BinaryIndexedView, handle: &StructHandle) -> Self {
         Self {
-            module: ModuleIdent::from_module_handle(module, module.module_handle_at(handle.module)),
-            datatype: module.identifier_at(handle.name).to_owned(),
+            module: ModuleIdent::from_module_handle(binary, binary.module_handle_at(handle.module)),
+            datatype: binary.identifier_at(handle.name).to_owned(),
         }
     }
 
@@ -76,10 +75,10 @@ pub struct FunctionIdent {
 
 impl FunctionIdent {
     /// Utility conversion from the corresponding handle in file_format
-    pub fn from_function_handle(module: &CompiledModule, handle: &FunctionHandle) -> Self {
+    pub fn from_function_handle(binary: &BinaryIndexedView, handle: &FunctionHandle) -> Self {
         Self {
-            module: ModuleIdent::from_module_handle(module, module.module_handle_at(handle.module)),
-            function: module.identifier_at(handle.name).to_owned(),
+            module: ModuleIdent::from_module_handle(binary, binary.module_handle_at(handle.module)),
+            function: binary.identifier_at(handle.name).to_owned(),
         }
     }
 
