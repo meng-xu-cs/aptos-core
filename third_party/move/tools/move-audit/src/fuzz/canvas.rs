@@ -19,6 +19,9 @@ pub enum SimpleType {
     String,
     Address,
     Signer,
+    Option {
+        element: Box<Self>,
+    },
     Vector {
         element: Box<Self>,
         variant: VectorVariant,
@@ -49,6 +52,9 @@ impl From<SimpleType> for TypeBase {
             SimpleType::String => TypeBase::String,
             SimpleType::Address => TypeBase::Address,
             SimpleType::Signer => TypeBase::Signer,
+            SimpleType::Option { element } => TypeBase::Option {
+                element: Box::new((*element).into()),
+            },
             SimpleType::Vector { element, variant } => TypeBase::Vector {
                 element: Box::new((*element).into()),
                 variant,
@@ -83,6 +89,9 @@ pub enum ComplexType {
         type_args: Vec<TypeBase>,
         abilities: AbilitySet,
     },
+    Option {
+        element: Box<Self>,
+    },
     Vector {
         element: Box<Self>,
         variant: VectorVariant,
@@ -115,6 +124,9 @@ impl From<ComplexType> for TypeBase {
                 ident,
                 type_args,
                 abilities,
+            },
+            ComplexType::Option { element } => TypeBase::Option {
+                element: Box::new((*element).into()),
             },
             ComplexType::Vector { element, variant } => TypeBase::Vector {
                 element: Box::new((*element).into()),
@@ -171,6 +183,18 @@ impl From<TypeBase> for TypeClosureBase {
             TypeBase::String => TypeClosureBase::Simple(SimpleType::String),
             TypeBase::Address => TypeClosureBase::Simple(SimpleType::Address),
             TypeBase::Signer => TypeClosureBase::Simple(SimpleType::Signer),
+            TypeBase::Option { element } => match TypeClosureBase::from(*element) {
+                TypeClosureBase::Simple(simple_element) => {
+                    TypeClosureBase::Simple(SimpleType::Option {
+                        element: simple_element.into(),
+                    })
+                },
+                TypeClosureBase::Complex(complex_element) => {
+                    TypeClosureBase::Complex(ComplexType::Option {
+                        element: complex_element.into(),
+                    })
+                },
+            },
             TypeBase::Vector { element, variant } => match TypeClosureBase::from(*element) {
                 TypeClosureBase::Simple(simple_element) => {
                     TypeClosureBase::Simple(SimpleType::Vector {
@@ -393,6 +417,7 @@ impl DriverCanvas {
             SimpleType::String => self.new_param(BasicType::String, depth),
             SimpleType::Address => self.new_param(BasicType::Address, depth),
             SimpleType::Signer => self.new_param(BasicType::Signer, depth),
+            SimpleType::Option { element: _ } => todo!("optional argument is not supported yet"),
             SimpleType::Vector { element, variant } => match variant {
                 VectorVariant::Vector => self.add_input_simple_recursive(element, depth + 1),
                 VectorVariant::BigVector => panic!("there is no way to construct a BigVector"),

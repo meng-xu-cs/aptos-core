@@ -38,6 +38,8 @@ enum DPGNode {
 enum DPGEdge {
     Use(usize),
     Def(usize),
+    OptionToElement,
+    ElementToOption,
     VectorToElement {
         variant: VectorVariant,
     },
@@ -158,6 +160,19 @@ impl Model {
         match item {
             DatatypeItem::Base(t) => match t {
                 ComplexType::Unit { .. } => (),
+                ComplexType::Option { element } => {
+                    let element_index = self.analyze_datatype_item(DatatypeItem::Base(*element));
+                    self.datatype_provider_graph.add_edge(
+                        index,
+                        element_index,
+                        DPGEdge::OptionToElement,
+                    );
+                    self.datatype_provider_graph.add_edge(
+                        element_index,
+                        index,
+                        DPGEdge::ElementToOption,
+                    );
+                },
                 ComplexType::Vector { element, variant } => {
                     let element_index = self.analyze_datatype_item(DatatypeItem::Base(*element));
                     self.datatype_provider_graph.add_edge(
