@@ -11,6 +11,7 @@ mod utils;
 pub use crate::common::LanguageSetting;
 use crate::{
     common::{PkgDeclaration, PkgDefinition, Project},
+    deps::PkgManifest,
     simulator::Simulator,
     testnet::{execute_runbook, provision_simulator},
 };
@@ -259,16 +260,12 @@ fn cmd_fuzz(
         language,
     } = project;
 
-    // build all packages initially, this is also a sanity check on the packages
-    let mut autogen_deps = vec![];
+    let mut autogen_deps = BTreeMap::new();
     let mut pkg_defs = vec![];
     for pkg_decl in pkg_filter.apply(pkgs)? {
         let manifest = pkg_decl.as_manifest();
-        autogen_deps.push(format!(
-            "{} = {{ local = \"{}\" }}",
-            manifest.name,
-            manifest.path.display()
-        ));
+        let existing = autogen_deps.insert(manifest.name.clone(), manifest.clone());
+        assert!(existing.is_none());
 
         log::debug!("compiling package {}", manifest.name);
         let pkg_built = package::build(manifest, &named_accounts, language, false)?;
@@ -288,24 +285,44 @@ fn cmd_fuzz(
     }
     fs::create_dir_all(&autogen_dir)?;
 
-    let autogen_manifest = format!(
+    let autogen_name = "Autogen".to_string();
+    let autogen_deps_str = autogen_deps
+        .iter()
+        .map(|(key, val)| format!("{key} = {{ local = \"{}\" }}", val.path.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let autogen_toml = format!(
         r#"
 [package]
-name = "Autogen"
+name = "{autogen_name}"
 version = "1.0.0"
 upgrade_policy = "compatible"
 authors = []
 
 [dependencies]
-{}
-"#,
-        autogen_deps.join("\n")
+{autogen_deps_str}
+"#
     );
-    fs::write(autogen_dir.join("Move.toml"), autogen_manifest)?;
+    fs::write(autogen_dir.join("Move.toml"), autogen_toml)?;
     fs::create_dir(autogen_dir.join("sources"))?;
 
+    // create a manifest for the autogen package
+    let autogen_manifest = PkgManifest {
+        name: autogen_name,
+        path: autogen_dir,
+        version: (1, 0, 0).into(),
+        deps: autogen_deps,
+        named_addresses: BTreeMap::new(),
+    };
+
     // done with preparation, now call the fuzzer
-    fuzz::run_on(pkg_defs, &autogen_dir, type_recursion_depth)
+    fuzz::run_on(
+        pkg_defs,
+        named_accounts,
+        language,
+        autogen_manifest,
+        type_recursion_depth,
+    )
 }
 
 /// Entrypoint on multi-package auditing
