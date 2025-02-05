@@ -22,6 +22,7 @@ use move_model::metadata::LanguageVersion;
 use regex::Regex;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
     path::{Path, PathBuf},
 };
 use tempfile::TempDir;
@@ -230,6 +231,7 @@ fn cmd_exec(project: &Project, runbook: &Path, realistic_gas: bool) -> Result<()
 }
 
 fn cmd_fuzz(
+    workdir: &Path,
     project: Project,
     pkg_filter: FilterPackage,
     type_recursion_depth: usize,
@@ -257,9 +259,17 @@ fn cmd_fuzz(
         language,
     } = project;
 
+    // build all packages initially, this is also a sanity check on the packages
+    let mut autogen_deps = vec![];
     let mut pkg_defs = vec![];
     for pkg_decl in pkg_filter.apply(pkgs)? {
         let manifest = pkg_decl.as_manifest();
+        autogen_deps.push(format!(
+            "{} = {{ local = \"{}\" }}",
+            manifest.name,
+            manifest.path.display()
+        ));
+
         log::debug!("compiling package {}", manifest.name);
         let pkg_built = package::build(manifest, &named_accounts, language, false)?;
 
@@ -271,8 +281,31 @@ fn cmd_fuzz(
         pkg_defs.push(pkg_def);
     }
 
+    // prepare the autogen package directory to host derived Move code
+    let autogen_dir = workdir.join("autogen");
+    if autogen_dir.exists() {
+        bail!("autogen directory already exists");
+    }
+    fs::create_dir_all(&autogen_dir)?;
+
+    let autogen_manifest = format!(
+        r#"
+[package]
+name = "Autogen"
+version = "1.0.0"
+upgrade_policy = "compatible"
+authors = []
+
+[dependencies]
+{}
+"#,
+        autogen_deps.join("\n")
+    );
+    fs::write(autogen_dir.join("Move.toml"), autogen_manifest)?;
+    fs::create_dir(autogen_dir.join("sources"))?;
+
     // done with preparation, now call the fuzzer
-    fuzz::run_on(pkg_defs, type_recursion_depth)
+    fuzz::run_on(pkg_defs, &autogen_dir, type_recursion_depth)
 }
 
 /// Entrypoint on multi-package auditing
@@ -414,7 +447,7 @@ pub fn run_on(
             let mut targets = vec![];
             match runbook {
                 None => {
-                    for entry in WalkDir::new(workdir) {
+                    for entry in WalkDir::new(&workdir) {
                         let entry = entry?;
                         if entry.path().extension().map_or(false, |ext| ext == "json") {
                             targets.push(entry.path().to_owned());
@@ -431,7 +464,7 @@ pub fn run_on(
             pkg_filter,
             type_recursion_depth,
         } => {
-            cmd_fuzz(project, pkg_filter, type_recursion_depth)?;
+            cmd_fuzz(&workdir, project, pkg_filter, type_recursion_depth)?;
         },
     }
 

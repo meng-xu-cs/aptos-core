@@ -11,9 +11,9 @@ use move_binary_format::{
     file_format::{Signature, Visibility},
 };
 use move_compiler::compiled_unit::CompiledUnit;
-use move_core_types::value::MoveTypeLayout;
+use move_core_types::value::{MoveStructLayout, MoveTypeLayout};
 use move_package::compilation::compiled_package::CompiledUnitWithSource;
-use std::{collections::BTreeMap, fmt::Display};
+use std::{collections::BTreeMap, fmt::Display, fs, path::Path};
 
 /// An identifier to an entrypoint to the contracts
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
@@ -35,7 +35,7 @@ impl Display for EntrypointIdent {
 /// The definition of an entrypoint to the contracts
 #[derive(Debug)]
 pub struct EntrypointDetails {
-    params: Vec<RuntimeType>,
+    params: Vec<(TypeRef, RuntimeType)>,
 }
 
 /// Type that can appear on an entrypoint parameter
@@ -55,7 +55,40 @@ pub enum RuntimeType {
     Option(Box<Self>),
     Vector(Box<Self>),
     Object(DatatypeIdent, Vec<TypeBase>),
-    Datatype(Vec<Vec<Self>>),
+    Struct(Vec<Self>),
+    Enum(Vec<Vec<Self>>),
+}
+
+impl<'a> Into<MoveTypeLayout> for &'a RuntimeType {
+    fn into(self) -> MoveTypeLayout {
+        match self {
+            RuntimeType::Bool => MoveTypeLayout::Bool,
+            RuntimeType::U8 => MoveTypeLayout::U8,
+            RuntimeType::U16 => MoveTypeLayout::U16,
+            RuntimeType::U32 => MoveTypeLayout::U32,
+            RuntimeType::U64 => MoveTypeLayout::U64,
+            RuntimeType::U128 => MoveTypeLayout::U128,
+            RuntimeType::U256 => MoveTypeLayout::U256,
+            RuntimeType::Bitvec => MoveTypeLayout::Vector(MoveTypeLayout::Bool.into()),
+            RuntimeType::String => MoveTypeLayout::Vector(MoveTypeLayout::U8.into()),
+            RuntimeType::Address => MoveTypeLayout::Address,
+            RuntimeType::Signer => MoveTypeLayout::Signer,
+            RuntimeType::Option(inner) => MoveTypeLayout::Vector(Box::new(inner.as_ref().into())),
+            RuntimeType::Vector(inner) => MoveTypeLayout::Vector(Box::new(inner.as_ref().into())),
+            RuntimeType::Object(..) => MoveTypeLayout::Address,
+            RuntimeType::Struct(fields) => MoveTypeLayout::Struct(MoveStructLayout::Runtime(
+                fields.iter().map(|f| f.into()).collect(),
+            )),
+            RuntimeType::Enum(variants) => {
+                MoveTypeLayout::Struct(MoveStructLayout::RuntimeVariants(
+                    variants
+                        .iter()
+                        .map(|variant| variant.iter().map(|f| f.into()).collect())
+                        .collect(),
+                ))
+            },
+        }
+    }
 }
 
 /// Captures all pre-fuzzing preparation
@@ -65,7 +98,7 @@ pub struct Preparer {
 }
 
 impl Preparer {
-    pub fn new(pkgs: &[PkgDefinition]) -> Self {
+    pub fn new(pkgs: &[PkgDefinition], autogen_dir: &Path) -> Self {
         // initialize the datatype registry
         let mut datatype_registry = DatatypeRegistry::new();
         for pkg in pkgs {
@@ -112,7 +145,7 @@ impl Preparer {
                         assert!(script.type_parameters.is_empty());
 
                         let mut params = vec![];
-                        for (ty_base, ty_runtime) in Self::convert_signature(
+                        for (ty_ref, ty_base, ty_runtime) in Self::convert_signature(
                             &datatype_registry,
                             &binary,
                             script.signature_at(script.parameters),
@@ -122,7 +155,7 @@ impl Preparer {
                                 matches!(ty_base, TypeBase::Signer)
                                     || ty_base.abilities().has_copy()
                             );
-                            params.push(ty_runtime);
+                            params.push((ty_ref, ty_runtime));
                         }
 
                         // register to mapping
@@ -152,7 +185,7 @@ impl Preparer {
                             // check parameters
                             let mut should_skip = false;
                             let mut params = vec![];
-                            for (ty_base, ty_runtime) in Self::convert_signature(
+                            for (ty_ref, ty_base, ty_runtime) in Self::convert_signature(
                                 &datatype_registry,
                                 &binary,
                                 module.signature_at(handle.parameters),
@@ -166,7 +199,7 @@ impl Preparer {
                                     should_skip = true;
                                     break;
                                 }
-                                params.push(ty_runtime);
+                                params.push((ty_ref, ty_runtime));
                             }
 
                             if should_skip {
@@ -214,8 +247,47 @@ impl Preparer {
                 };
             }
         }
-
         log::info!("entrypoints discovered: {}", entrypoints.len());
+
+        // generate move scripts for all public functions (excluding public entry functions)
+        let autogen_src = autogen_dir.join("sources");
+        assert!(autogen_src.is_dir());
+
+        for (ident, details) in &entrypoints {
+            let ident = match ident {
+                EntrypointIdent::PublicFunction(ident) => ident,
+                EntrypointIdent::Script(_) | EntrypointIdent::EntryFunction(_) => continue,
+            };
+
+            // generate argument definition and usage
+            let mut param_decls = vec![];
+            let mut arg_uses = vec![];
+            for (i, (ty_ref, _)) in details.params.iter().enumerate() {
+                let name = format!("p{i}");
+                param_decls.push(format!("{name}: {ty_ref}"));
+                arg_uses.push(name);
+            }
+
+            // compose the script
+            let script_name = format!("{}_{}", ident.module_name(), ident.function_name());
+            let script = format!(
+                r#"
+script {{
+    fun autogen_{script_name}({}) {{
+        {ident}({});
+    }}
+}}
+"#,
+                param_decls.join(","),
+                arg_uses.join(","),
+            );
+
+            // save the script to the autogen package
+            let script_path = autogen_src.join(format!("{script_name}.move"));
+            assert!(!script_path.exists());
+            fs::write(&script_path, &script).expect("failed to write script file");
+        }
+
         Self { entrypoints }
     }
 
@@ -223,19 +295,20 @@ impl Preparer {
         registry: &DatatypeRegistry,
         binary: &BinaryIndexedView,
         params: &Signature,
-    ) -> Vec<(TypeBase, RuntimeType)> {
+    ) -> Vec<(TypeRef, TypeBase, RuntimeType)> {
         let mut param_types = vec![];
         for token in params.0.iter() {
-            let ty_tag = match registry.convert_signature_token(binary, token) {
+            let ty_ref = registry.convert_signature_token(binary, token);
+            let ty_tag = match &ty_ref {
                 TypeRef::Base(t) => t,
                 TypeRef::ImmRef(t) => t,
                 TypeRef::MutRef(t) => t,
             };
 
             // TODO: assumed no type arguments above for simplicity
-            let ty_base = registry.instantiate_type_tag(&ty_tag, &[]);
+            let ty_base = registry.instantiate_type_tag(ty_tag, &[]);
             let ty_runtime = Self::convert_type_base(registry, &ty_base);
-            param_types.push((ty_base, ty_runtime));
+            param_types.push((ty_ref, ty_base, ty_runtime));
         }
         param_types
     }
@@ -273,9 +346,9 @@ impl Preparer {
                 let (decl, content) = registry.lookup_decl_and_content(&ident);
                 assert_eq!(decl.generics.len(), type_args.len());
 
-                let datatype_content = match content {
+                match content {
                     DatatypeContent::Fields(fields) => {
-                        let tys: Vec<_> = fields
+                        let tys = fields
                             .iter()
                             .map(|t| {
                                 Self::convert_type_base(
@@ -284,24 +357,26 @@ impl Preparer {
                                 )
                             })
                             .collect();
-                        vec![tys]
+                        RuntimeType::Struct(tys)
                     },
-                    DatatypeContent::Variants(variants) => variants
-                        .values()
-                        .map(|fields| {
-                            fields
-                                .iter()
-                                .map(|t| {
-                                    Self::convert_type_base(
-                                        registry,
-                                        &registry.instantiate_type_tag(t, type_args),
-                                    )
-                                })
-                                .collect()
-                        })
-                        .collect(),
-                };
-                RuntimeType::Datatype(datatype_content)
+                    DatatypeContent::Variants(variants) => {
+                        let tys = variants
+                            .values()
+                            .map(|fields| {
+                                fields
+                                    .iter()
+                                    .map(|t| {
+                                        Self::convert_type_base(
+                                            registry,
+                                            &registry.instantiate_type_tag(t, type_args),
+                                        )
+                                    })
+                                    .collect()
+                            })
+                            .collect();
+                        RuntimeType::Enum(tys)
+                    },
+                }
             },
             TypeBase::Object {
                 ident,
