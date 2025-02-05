@@ -1,19 +1,21 @@
 use crate::{
-    common::PkgDefinition,
+    common::{Account, PkgDefinition},
+    deps::PkgManifest,
     fuzz::{
         ident::{DatatypeIdent, FunctionIdent},
         typing::{DatatypeContent, DatatypeRegistry, TypeBase, TypeRef, VectorVariant},
     },
+    package, LanguageSetting,
 };
 use move_binary_format::{
     access::{ModuleAccess, ScriptAccess},
     binary_views::BinaryIndexedView,
-    file_format::{Signature, Visibility},
+    file_format::{CompiledScript, Signature, Visibility},
 };
-use move_compiler::compiled_unit::CompiledUnit;
+use move_compiler::compiled_unit::{CompiledUnit, CompiledUnitEnum};
 use move_core_types::value::{MoveStructLayout, MoveTypeLayout};
 use move_package::compilation::compiled_package::CompiledUnitWithSource;
-use std::{collections::BTreeMap, fmt::Display, fs, path::Path};
+use std::{collections::BTreeMap, fmt::Display, fs};
 
 /// An identifier to an entrypoint to the contracts
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
@@ -95,10 +97,14 @@ impl<'a> Into<MoveTypeLayout> for &'a RuntimeType {
 pub struct Preparer {
     /// a database of entry-points
     entrypoints: BTreeMap<EntrypointIdent, EntrypointDetails>,
+    /// scripts that are coupled in the package
+    scripts_coupled: BTreeMap<String, CompiledScript>,
+    /// scripts that are generated
+    scripts_autogen: BTreeMap<FunctionIdent, CompiledScript>,
 }
 
 impl Preparer {
-    pub fn new(pkgs: &[PkgDefinition], autogen_dir: &Path) -> Self {
+    pub fn new(pkgs: &[PkgDefinition]) -> Self {
         // initialize the datatype registry
         let mut datatype_registry = DatatypeRegistry::new();
         for pkg in pkgs {
@@ -119,6 +125,7 @@ impl Preparer {
         }
 
         // initialize the entrypoint registry
+        let mut scripts_coupled = BTreeMap::new();
         let mut entrypoints = BTreeMap::new();
         for pkg in pkgs {
             let is_primary = matches!(pkg, PkgDefinition::Primary(_));
@@ -136,6 +143,10 @@ impl Preparer {
                 match unit {
                     CompiledUnit::Script(script) => {
                         // NOTE: simplified assumption that every script has a different name
+                        let exists =
+                            scripts_coupled.insert(script.name.to_string(), script.script.clone());
+                        assert!(exists.is_none());
+
                         let ident = EntrypointIdent::Script(script.name.to_string());
                         let script = &script.script;
                         let binary = BinaryIndexedView::Script(script);
@@ -158,7 +169,7 @@ impl Preparer {
                             params.push((ty_ref, ty_runtime));
                         }
 
-                        // register to mapping
+                        // register to the entrypoint mapping
                         let existing = entrypoints.insert(ident, EntrypointDetails { params });
                         assert!(existing.is_none());
                     },
@@ -234,7 +245,7 @@ impl Preparer {
                                 continue;
                             }
 
-                            // register to mapping
+                            // register to the entrypoint mapping
                             let ident = if def.is_entry {
                                 EntrypointIdent::EntryFunction(ident)
                             } else {
@@ -247,48 +258,14 @@ impl Preparer {
                 };
             }
         }
+
+        // done with the provision
         log::info!("entrypoints discovered: {}", entrypoints.len());
-
-        // generate move scripts for all public functions (excluding public entry functions)
-        let autogen_src = autogen_dir.join("sources");
-        assert!(autogen_src.is_dir());
-
-        for (ident, details) in &entrypoints {
-            let ident = match ident {
-                EntrypointIdent::PublicFunction(ident) => ident,
-                EntrypointIdent::Script(_) | EntrypointIdent::EntryFunction(_) => continue,
-            };
-
-            // generate argument definition and usage
-            let mut param_decls = vec![];
-            let mut arg_uses = vec![];
-            for (i, (ty_ref, _)) in details.params.iter().enumerate() {
-                let name = format!("p{i}");
-                param_decls.push(format!("{name}: {ty_ref}"));
-                arg_uses.push(name);
-            }
-
-            // compose the script
-            let script_name = format!("{}_{}", ident.module_name(), ident.function_name());
-            let script = format!(
-                r#"
-script {{
-    fun autogen_{script_name}({}) {{
-        {ident}({});
-    }}
-}}
-"#,
-                param_decls.join(","),
-                arg_uses.join(","),
-            );
-
-            // save the script to the autogen package
-            let script_path = autogen_src.join(format!("{script_name}.move"));
-            assert!(!script_path.exists());
-            fs::write(&script_path, &script).expect("failed to write script file");
+        Self {
+            entrypoints,
+            scripts_coupled,
+            scripts_autogen: BTreeMap::new(),
         }
-
-        Self { entrypoints }
     }
 
     fn convert_signature(
@@ -383,6 +360,77 @@ script {{
                 type_args,
                 abilities: _,
             } => RuntimeType::Object(ident.clone(), type_args.clone()),
+        }
+    }
+
+    /// Prepare and build the autogen package
+    pub fn generate_scripts(
+        &mut self,
+        named_accounts: &BTreeMap<String, Account>,
+        language: LanguageSetting,
+        autogen_manifest: &PkgManifest,
+    ) {
+        // generate move scripts for all public functions (excluding public entry functions)
+        let autogen_src = autogen_manifest.path.join("sources");
+        assert!(autogen_src.is_dir());
+
+        let mut script_to_ident = BTreeMap::new();
+        for (ident, details) in &self.entrypoints {
+            let ident = match ident {
+                EntrypointIdent::PublicFunction(ident) => ident,
+                EntrypointIdent::Script(_) | EntrypointIdent::EntryFunction(_) => continue,
+            };
+
+            // generate argument definition and usage
+            let mut param_decls = vec![];
+            let mut arg_uses = vec![];
+            for (i, (ty_ref, _)) in details.params.iter().enumerate() {
+                let name = format!("p{i}");
+                param_decls.push(format!("{name}: {ty_ref}"));
+                arg_uses.push(name);
+            }
+
+            // compose the script
+            let script_name = format!("script_{}_{}", ident.module_name(), ident.function_name());
+            let script = format!(
+                r#"
+script {{
+    fun {script_name}({}) {{
+        {ident}({});
+    }}
+}}
+"#,
+                param_decls.join(","),
+                arg_uses.join(","),
+            );
+
+            // save the script to the autogen package
+            let script_path = autogen_src.join(format!("{script_name}.move"));
+            assert!(!script_path.exists());
+            fs::write(&script_path, &script).expect("failed to write script file");
+
+            // save the mapping
+            script_to_ident.insert(script_path, ident.clone());
+        }
+
+        // compile this autogen module
+        let pkg_built = package::build(autogen_manifest, named_accounts, language, false)
+            .unwrap_or_else(|why| panic!("unable to build the autogen package: {why}"));
+        log::info!("autogen package built successfully");
+
+        // get the scripts
+        for unit in pkg_built.package.root_compiled_units {
+            let path = unit.source_path;
+            match unit.unit {
+                CompiledUnitEnum::Module(_) => panic!("unexpected module in the autogen package"),
+                CompiledUnitEnum::Script(script) => {
+                    let ident = script_to_ident.remove(&path).unwrap_or_else(|| {
+                        panic!("failed to find the ident for script {}", script.name)
+                    });
+                    let exists = self.scripts_autogen.insert(ident, script.script);
+                    assert!(exists.is_none());
+                },
+            }
         }
     }
 }
