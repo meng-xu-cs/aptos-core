@@ -142,12 +142,19 @@ impl Preparer {
             {
                 match unit {
                     CompiledUnit::Script(script) => {
+                        let name = format!(
+                            "{}::{}",
+                            script
+                                .package_name
+                                .expect("coupled script should belong to a Move package"),
+                            script.name
+                        );
+
                         // NOTE: simplified assumption that every script has a different name
-                        let exists =
-                            scripts_coupled.insert(script.name.to_string(), script.script.clone());
+                        let exists = scripts_coupled.insert(name.clone(), script.script.clone());
                         assert!(exists.is_none());
 
-                        let ident = EntrypointIdent::Script(script.name.to_string());
+                        let ident = EntrypointIdent::Script(name);
                         let script = &script.script;
                         let binary = BinaryIndexedView::Script(script);
 
@@ -432,5 +439,8 @@ script {{
                 },
             }
         }
+
+        // sanity check to ensure that all scripts are generated
+        assert!(script_to_ident.is_empty());
     }
 }
