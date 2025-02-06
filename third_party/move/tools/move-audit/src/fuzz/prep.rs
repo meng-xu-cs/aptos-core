@@ -13,12 +13,16 @@ use move_binary_format::{
     file_format::{CompiledScript, Signature, Visibility},
 };
 use move_compiler::compiled_unit::{CompiledUnit, CompiledUnitEnum};
-use move_core_types::value::{MoveStructLayout, MoveTypeLayout};
+use move_core_types::{
+    account_address::AccountAddress,
+    u256,
+    value::{MoveStruct, MoveStructLayout, MoveTypeLayout, MoveValue},
+};
 use move_package::compilation::compiled_package::CompiledUnitWithSource;
 use std::{collections::BTreeMap, fmt::Display, fs};
 
 /// An identifier to an entrypoint to the contracts
-#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub enum EntrypointIdent {
     EntryFunction(FunctionIdent),
     PublicFunction(FunctionIdent),
@@ -442,5 +446,97 @@ script {{
 
         // sanity check to ensure that all scripts are generated
         assert!(script_to_ident.is_empty());
+    }
+
+    /// List all entry point identifiers
+    pub fn all_entry_idents(&self) -> Vec<EntrypointIdent> {
+        self.entrypoints.keys().cloned().collect()
+    }
+
+    /// Randomly generate a Move value based on a runtime type
+    fn generate_random_value(&self, ty: &RuntimeType) -> MoveValue {
+        match ty {
+            RuntimeType::Bool => MoveValue::Bool(rand::random()),
+            // TODO: give special values more weight for integers
+            RuntimeType::U8 => MoveValue::U8(rand::random()),
+            RuntimeType::U16 => MoveValue::U16(rand::random()),
+            RuntimeType::U32 => MoveValue::U32(rand::random()),
+            RuntimeType::U64 => MoveValue::U64(rand::random()),
+            RuntimeType::U128 => MoveValue::U128(rand::random()),
+            RuntimeType::U256 => MoveValue::U256(u256::U256::from_le_bytes(&rand::random())),
+            RuntimeType::Bitvec => {
+                let size = rand::random::<u8>() % 10;
+                MoveValue::Vector(
+                    (0..size)
+                        .map(|_| self.generate_random_value(&RuntimeType::Bool))
+                        .collect(),
+                )
+            },
+            RuntimeType::String => {
+                // TODO: use the string dictionary
+                MoveValue::Vector(vec![])
+            },
+            RuntimeType::Address => {
+                // TODO: use the address dictionary
+                MoveValue::Address(AccountAddress::ZERO)
+            },
+            RuntimeType::Signer => {
+                // TODO: use the signer dictionary
+                MoveValue::Signer(AccountAddress::ZERO)
+            },
+            RuntimeType::Option(inner) => {
+                if rand::random() {
+                    MoveValue::Vector(vec![])
+                } else {
+                    MoveValue::Vector(vec![self.generate_random_value(inner)])
+                }
+            },
+            RuntimeType::Vector(element) => {
+                let size = rand::random::<u8>() % 10;
+                MoveValue::Vector(
+                    (0..size)
+                        .map(|_| self.generate_random_value(element))
+                        .collect(),
+                )
+            },
+            RuntimeType::Object(..) => {
+                // TODO: use the object dictionary
+                MoveValue::Address(AccountAddress::ZERO)
+            },
+            RuntimeType::Struct(fields) => MoveValue::Struct(MoveStruct::Runtime(
+                fields
+                    .iter()
+                    .map(|t| self.generate_random_value(t))
+                    .collect(),
+            )),
+            RuntimeType::Enum(variants) => {
+                let index = rand::random::<usize>() % variants.len();
+                MoveValue::Struct(MoveStruct::RuntimeVariant(
+                    index as u16,
+                    variants[index]
+                        .iter()
+                        .map(|t| self.generate_random_value(t))
+                        .collect(),
+                ))
+            },
+        }
+    }
+
+    /// Generate a transaction payload out of an entry point
+    pub fn random_payload(&self, ident: &EntrypointIdent) {
+        let details = self
+            .entrypoints
+            .get(ident)
+            .unwrap_or_else(|| panic!("unable to find entrypoint: {ident}"));
+
+        let args: Vec<_> = details
+            .params
+            .iter()
+            .map(|(_, ty)| {
+                self.generate_random_value(ty)
+                    .simple_serialize()
+                    .expect("MoveValue must be serializable")
+            })
+            .collect();
     }
 }
