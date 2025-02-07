@@ -326,7 +326,12 @@ impl TracingExecutor {
             &code_storage,
             &signed_txn,
             &log_context,
-            |gas_feature_version, vm_gas_params, _, is_approved_gov_script, meter_balance| {
+            |gas_feature_version,
+             vm_gas_params,
+             _,
+             is_approved_gov_script,
+             meter_balance,
+             kill_switch| {
                 StandardGasMeter::new(StandardGasAlgebra::new(
                     gas_feature_version,
                     VMGasParameters {
@@ -337,6 +342,7 @@ impl TracingExecutor {
                     StorageGasParameters::unlimited(),
                     is_approved_gov_script,
                     meter_balance,
+                    kill_switch,
                 ))
             },
         );
