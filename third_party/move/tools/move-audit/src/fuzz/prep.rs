@@ -11,16 +11,14 @@ use aptos_types::transaction::{EntryFunction, Script, TransactionPayload};
 use move_binary_format::{
     access::{ModuleAccess, ScriptAccess},
     binary_views::BinaryIndexedView,
-    file_format::{CompiledScript, Signature, Visibility},
+    file_format::{Signature, Visibility},
 };
 use move_compiler::compiled_unit::{CompiledUnit, CompiledUnitEnum};
 use move_core_types::{
     account_address::AccountAddress,
-    identifier::Identifier,
-    language_storage::ModuleId,
     transaction_argument::TransactionArgument,
     u256,
-    value::{MoveStruct, MoveStructLayout, MoveTypeLayout, MoveValue},
+    value::{MoveStruct, MoveValue},
 };
 use move_package::compilation::compiled_package::CompiledUnitWithSource;
 use std::{collections::BTreeMap, fmt::Display, fs};
@@ -45,6 +43,7 @@ impl Display for EntrypointIdent {
 /// The definition of an entrypoint to the contracts
 #[derive(Debug)]
 pub struct EntrypointDetails {
+    sender: Option<(TypeRef, RuntimeType)>,
     params: Vec<(TypeRef, RuntimeType)>,
 }
 
@@ -67,38 +66,6 @@ pub enum RuntimeType {
     Object(DatatypeIdent, Vec<TypeBase>),
     Struct(Vec<Self>),
     Enum(Vec<Vec<Self>>),
-}
-
-impl<'a> Into<MoveTypeLayout> for &'a RuntimeType {
-    fn into(self) -> MoveTypeLayout {
-        match self {
-            RuntimeType::Bool => MoveTypeLayout::Bool,
-            RuntimeType::U8 => MoveTypeLayout::U8,
-            RuntimeType::U16 => MoveTypeLayout::U16,
-            RuntimeType::U32 => MoveTypeLayout::U32,
-            RuntimeType::U64 => MoveTypeLayout::U64,
-            RuntimeType::U128 => MoveTypeLayout::U128,
-            RuntimeType::U256 => MoveTypeLayout::U256,
-            RuntimeType::Bitvec => MoveTypeLayout::Vector(MoveTypeLayout::Bool.into()),
-            RuntimeType::String => MoveTypeLayout::Vector(MoveTypeLayout::U8.into()),
-            RuntimeType::Address => MoveTypeLayout::Address,
-            RuntimeType::Signer => MoveTypeLayout::Signer,
-            RuntimeType::Option(inner) => MoveTypeLayout::Vector(Box::new(inner.as_ref().into())),
-            RuntimeType::Vector(inner) => MoveTypeLayout::Vector(Box::new(inner.as_ref().into())),
-            RuntimeType::Object(..) => MoveTypeLayout::Address,
-            RuntimeType::Struct(fields) => MoveTypeLayout::Struct(MoveStructLayout::Runtime(
-                fields.iter().map(|f| f.into()).collect(),
-            )),
-            RuntimeType::Enum(variants) => {
-                MoveTypeLayout::Struct(MoveStructLayout::RuntimeVariants(
-                    variants
-                        .iter()
-                        .map(|variant| variant.iter().map(|f| f.into()).collect())
-                        .collect(),
-                ))
-            },
-        }
-    }
 }
 
 /// Captures all pre-fuzzing preparation
@@ -171,7 +138,7 @@ impl Preparer {
                             .script
                             .serialize_for_version(bytecode_version, &mut code)
                             .unwrap_or_else(|why| {
-                                panic!("unable to deserialize a coupled CompiledScript")
+                                panic!("unable to deserialize a coupled CompiledScript: {why}")
                             });
                         let exists = scripts_coupled.insert(name.clone(), code);
                         // NOTE: simplified assumption that every script has a different name
@@ -185,22 +152,30 @@ impl Preparer {
                         // TODO: remove this simplification
                         assert!(script.type_parameters.is_empty());
 
-                        let mut params = vec![];
-                        for (ty_ref, ty_base, ty_runtime) in Self::convert_signature(
+                        // convert the parameters
+                        let converted = Self::convert_signature(
                             &datatype_registry,
                             &binary,
                             script.signature_at(script.parameters),
-                        ) {
-                            // sanity check
-                            assert!(
-                                matches!(ty_base, TypeBase::Signer)
-                                    || ty_base.abilities().has_copy()
-                            );
-                            params.push((ty_ref, ty_runtime));
+                        );
+
+                        let mut sender = None;
+                        let mut params = vec![];
+                        for (i, (ty_ref, ty_base, ty_runtime)) in converted.into_iter().enumerate()
+                        {
+                            if matches!(ty_base, TypeBase::Signer) {
+                                // signer can only appear as the first argument
+                                assert_eq!(i, 0);
+                                sender = Some((ty_ref, ty_runtime));
+                            } else {
+                                assert!(ty_base.abilities().has_copy());
+                                params.push((ty_ref, ty_runtime));
+                            }
                         }
 
                         // register to the entrypoint mapping
-                        let existing = entrypoints.insert(ident, EntrypointDetails { params });
+                        let existing =
+                            entrypoints.insert(ident, EntrypointDetails { sender, params });
                         assert!(existing.is_none());
                     },
                     CompiledUnit::Module(module) => {
@@ -223,24 +198,34 @@ impl Preparer {
                                 continue;
                             }
 
-                            // check parameters
-                            let mut should_skip = false;
-                            let mut params = vec![];
-                            for (ty_ref, ty_base, ty_runtime) in Self::convert_signature(
+                            // convert and check parameters
+                            let converted = Self::convert_signature(
                                 &datatype_registry,
                                 &binary,
                                 module.signature_at(handle.parameters),
-                            ) {
-                                if !ty_base.abilities().has_copy()
-                                    && !matches!(ty_base, TypeBase::Signer)
-                                {
-                                    assert!(!def.is_entry);
+                            );
+
+                            let mut should_skip = false;
+                            let mut sender = None;
+                            let mut params = vec![];
+                            for (i, (ty_ref, ty_base, ty_runtime)) in
+                                converted.into_iter().enumerate()
+                            {
+                                if matches!(ty_base, TypeBase::Signer) {
+                                    // signer can only appear as the first argument
+                                    assert_eq!(i, 0);
+                                    sender = Some((ty_ref, ty_runtime));
+                                } else {
                                     // NOTE: skip functions that take non-trivial arguments
                                     // TODO: remove this simplification
-                                    should_skip = true;
-                                    break;
+                                    if !ty_base.abilities().has_copy() {
+                                        assert!(!def.is_entry);
+                                        should_skip = true;
+                                        break;
+                                    }
+                                    assert!(ty_base.abilities().has_copy());
+                                    params.push((ty_ref, ty_runtime));
                                 }
-                                params.push((ty_ref, ty_runtime));
                             }
 
                             if should_skip {
@@ -281,7 +266,8 @@ impl Preparer {
                             } else {
                                 EntrypointIdent::PublicFunction(ident)
                             };
-                            let existing = entrypoints.insert(ident, EntrypointDetails { params });
+                            let existing =
+                                entrypoints.insert(ident, EntrypointDetails { sender, params });
                             assert!(existing.is_none());
                         }
                     },
@@ -414,7 +400,12 @@ impl Preparer {
             // generate argument definition and usage
             let mut param_decls = vec![];
             let mut arg_uses = vec![];
-            for (i, (ty_ref, _)) in details.params.iter().enumerate() {
+            for (i, (ty_ref, _)) in details
+                .sender
+                .iter()
+                .chain(details.params.iter())
+                .enumerate()
+            {
                 let name = format!("p{i}");
                 param_decls.push(format!("{name}: {ty_ref}"));
                 arg_uses.push(name);

@@ -490,24 +490,30 @@ impl TracingExecutor {
         Ok(())
     }
 
-    /// Provision the executor with a list of pre-compiled modules
-    pub fn provision(&mut self, pkgs: &[PkgDefinition]) -> Result<()> {
-        // process packages in the order of their dependency chain
-        for pkg in pkgs {
-            match pkg {
-                PkgDefinition::Framework(built_package) => {
-                    self.provision_framework_package(built_package)?
-                },
-                PkgDefinition::Dependency(built_package) => {
-                    self.provision_regular_package(NamedAddressKind::Dependency, built_package)?;
-                },
-                PkgDefinition::Primary(built_package) => {
-                    self.provision_regular_package(NamedAddressKind::Primary, built_package)?;
-                },
-            }
+    /// Provision the executor with a pre-compiled package
+    pub fn add_new_package(&mut self, pkg: &PkgDefinition) -> Result<()> {
+        match pkg {
+            PkgDefinition::Framework(built_package) => {
+                self.provision_framework_package(built_package)
+            },
+            PkgDefinition::Dependency(built_package) => {
+                self.provision_regular_package(NamedAddressKind::Dependency, built_package)
+            },
+            PkgDefinition::Primary(built_package) => {
+                self.provision_regular_package(NamedAddressKind::Primary, built_package)
+            },
         }
+    }
 
-        // done
+    /// Create a new user account in the executor
+    pub fn add_new_user(&mut self) {
+        let account = self.address_registry.make_user_account();
+        self.create_account(account, INITIAL_APT_BALANCE);
+    }
+
+    /// Run a transaction with a random sender
+    pub fn run_payload_with_random_sender(&mut self, payload: TransactionPayload) -> Result<()> {
+        self.execute_transaction(self.address_registry.random_address(), payload)?;
         Ok(())
     }
 }

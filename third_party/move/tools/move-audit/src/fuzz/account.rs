@@ -2,6 +2,7 @@ use anyhow::{bail, Result};
 use aptos_language_e2e_tests::account::Account;
 use move_core_types::account_address::AccountAddress;
 use move_package::source_package::parsed_manifest::NamedAddress;
+use rand::seq::IteratorRandom;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Display,
@@ -179,6 +180,22 @@ impl AddressRegistry {
         Ok(account_created)
     }
 
+    /// Create a new user account and return its address
+    pub fn make_user_account(&mut self) -> Account {
+        let id = UserId(self.user_addresses.len());
+        let account = Account::new();
+        let address = *account.address();
+
+        let exists = self.user_addresses.insert(id, address);
+        assert!(exists.is_none());
+        self.details.insert(address, AddressDetails::User {
+            id,
+            account: account.clone(),
+        });
+
+        account
+    }
+
     /// Lookup the account from an address
     pub fn lookup_account(&self, addr: AccountAddress) -> Option<&Account> {
         match self.details.get(&addr)? {
@@ -186,5 +203,15 @@ impl AddressRegistry {
                 Some(account)
             },
         }
+    }
+
+    /// Get a random address in this system
+    pub fn random_address(&self) -> AccountAddress {
+        // TODO: maybe use weighted randomness for different account types?
+        *self
+            .details
+            .keys()
+            .choose(&mut rand::thread_rng())
+            .expect("at least one account to choose from")
     }
 }

@@ -21,11 +21,18 @@ pub fn run_on(
     named_accounts: BTreeMap<String, Account>,
     language: LanguageSetting,
     autogen_manifest: PkgManifest,
+    num_users: usize,
     type_recursion_depth: usize,
 ) -> Result<()> {
     // initialize the tracing executor
     let mut executor = executor::TracingExecutor::new();
-    executor.provision(&pkg_defs)?;
+    for pkg in &pkg_defs {
+        // process packages in the order of their dependency chain
+        executor.add_new_package(pkg)?
+    }
+    for _ in 0..num_users {
+        executor.add_new_user();
+    }
 
     // TODO: advanced processing
     // build a model on the packages
@@ -42,7 +49,8 @@ pub fn run_on(
     let mut i = 0;
     loop {
         for ident in &all_entrypoints {
-            preparer.generate_random_payload(ident);
+            let payload = preparer.generate_random_payload(ident);
+            executor.run_payload_with_random_sender(payload)?;
         }
         i += 1;
         if i % 1000 == 0 {
