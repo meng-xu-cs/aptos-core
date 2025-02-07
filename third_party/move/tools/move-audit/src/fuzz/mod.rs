@@ -3,7 +3,9 @@ use crate::{
     deps::PkgManifest,
 };
 use anyhow::Result;
-use std::collections::BTreeMap;
+use itertools::Itertools;
+use move_core_types::vm_status::VMStatus;
+use std::{collections::BTreeMap, fmt::Display, ops::AddAssign};
 
 mod account;
 mod canvas;
@@ -14,6 +16,25 @@ mod ident;
 mod model;
 mod prep;
 mod typing;
+
+#[derive(Ord, PartialOrd, Eq, PartialEq)]
+enum ExecStatus {
+    Success,
+    AbortIntrinsic,
+    AbortDeclared,
+    Error,
+}
+
+impl Display for ExecStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExecStatus::Success => write!(f, "success"),
+            ExecStatus::AbortIntrinsic => write!(f, "abort-i"),
+            ExecStatus::AbortDeclared => write!(f, "abort-c"),
+            ExecStatus::Error => write!(f, "error"),
+        }
+    }
+}
 
 /// Entrypoint for the fuzzer
 pub fn run_on(
@@ -46,16 +67,38 @@ pub fn run_on(
     // stage 1: per-function fuzzing
     let all_entrypoints = preparer.all_entry_idents();
 
+    let mut stats: BTreeMap<_, usize> = [
+        (ExecStatus::Success, 0),
+        (ExecStatus::AbortIntrinsic, 0),
+        (ExecStatus::AbortDeclared, 0),
+        (ExecStatus::Error, 0),
+    ]
+    .into_iter()
+    .collect();
+
     let mut i = 0;
     loop {
         for ident in &all_entrypoints {
+            log::debug!("running transaction for {ident}");
             let payload = preparer.generate_random_payload(ident);
-            executor.run_payload_with_random_sender(payload)?;
+            let (status, _) = executor.run_payload_with_random_sender(payload)?;
+            match status {
+                VMStatus::Executed => stats.get_mut(&ExecStatus::Success).unwrap().add_assign(1),
+                VMStatus::Error { .. } => stats.get_mut(&ExecStatus::Error).unwrap().add_assign(1),
+                VMStatus::ExecutionFailure { .. } => stats
+                    .get_mut(&ExecStatus::AbortIntrinsic)
+                    .unwrap()
+                    .add_assign(1),
+                VMStatus::MoveAbort { .. } => stats
+                    .get_mut(&ExecStatus::AbortDeclared)
+                    .unwrap()
+                    .add_assign(1),
+            }
         }
         i += 1;
-        if i % 1000 == 0 {
-            log::info!("Tried {i} iterations");
-        }
+
+        let summary = stats.iter().map(|(k, v)| format!("{k}: {v}")).join("\n");
+        log::info!("Status after iteration {i}\n{summary}");
     }
 
     // done
