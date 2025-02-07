@@ -2,7 +2,9 @@ use move_binary_format::{
     binary_views::BinaryIndexedView,
     file_format::{FunctionHandle, ModuleHandle, StructHandle},
 };
-use move_core_types::{account_address::AccountAddress, identifier::Identifier};
+use move_core_types::{
+    account_address::AccountAddress, identifier::Identifier, language_storage::ModuleId,
+};
 use std::fmt::Display;
 
 /// A unique identifier for a module
@@ -19,6 +21,11 @@ impl ModuleIdent {
             address: *binary.address_identifier_at(handle.address),
             name: binary.identifier_at(handle.name).to_owned(),
         }
+    }
+
+    /// Convert the ident to a `ModuleId`
+    pub fn to_module_id(&self) -> ModuleId {
+        ModuleId::new(self.address, self.name.clone())
     }
 }
 
@@ -95,6 +102,11 @@ impl FunctionIdent {
     /// Get the function name
     pub fn function_name(&self) -> &str {
         self.function.as_str()
+    }
+
+    /// Convert the ident to a `ModuleId`
+    pub fn to_module_and_function_id(&self) -> (ModuleId, Identifier) {
+        (self.module.to_module_id(), self.function.clone())
     }
 }
 

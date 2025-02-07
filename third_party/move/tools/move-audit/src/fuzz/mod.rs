@@ -37,6 +37,18 @@ pub fn run_on(
     preparer.generate_scripts(&named_accounts, language, &autogen_manifest);
 
     // stage 1: per-function fuzzing
+    let all_entrypoints = preparer.all_entry_idents();
+
+    let mut i = 0;
+    loop {
+        for ident in &all_entrypoints {
+            preparer.generate_random_payload(ident);
+        }
+        i += 1;
+        if i % 1000 == 0 {
+            log::info!("Tried {i} iterations");
+        }
+    }
 
     // done
     Ok(())
