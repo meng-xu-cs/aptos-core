@@ -7,6 +7,7 @@ use crate::{
     },
     package, LanguageSetting,
 };
+use aptos_types::transaction::{EntryFunction, Script, TransactionPayload};
 use move_binary_format::{
     access::{ModuleAccess, ScriptAccess},
     binary_views::BinaryIndexedView,
@@ -15,6 +16,9 @@ use move_binary_format::{
 use move_compiler::compiled_unit::{CompiledUnit, CompiledUnitEnum};
 use move_core_types::{
     account_address::AccountAddress,
+    identifier::Identifier,
+    language_storage::ModuleId,
+    transaction_argument::TransactionArgument,
     u256,
     value::{MoveStruct, MoveStructLayout, MoveTypeLayout, MoveValue},
 };
@@ -102,9 +106,9 @@ pub struct Preparer {
     /// a database of entry-points
     entrypoints: BTreeMap<EntrypointIdent, EntrypointDetails>,
     /// scripts that are coupled in the package
-    scripts_coupled: BTreeMap<String, CompiledScript>,
+    scripts_coupled: BTreeMap<String, Vec<u8>>,
     /// scripts that are generated
-    scripts_autogen: BTreeMap<FunctionIdent, CompiledScript>,
+    scripts_autogen: BTreeMap<FunctionIdent, Vec<u8>>,
 }
 
 impl Preparer {
@@ -139,10 +143,17 @@ impl Preparer {
                 continue;
             }
 
+            let compiled_pkg = &pkg.as_built_package().package;
+            let bytecode_version = compiled_pkg
+                .compiled_package_info
+                .build_flags
+                .compiler_config
+                .bytecode_version;
+
             for CompiledUnitWithSource {
                 unit,
                 source_path: _,
-            } in &pkg.as_built_package().package.root_compiled_units
+            } in &compiled_pkg.root_compiled_units
             {
                 match unit {
                     CompiledUnit::Script(script) => {
@@ -154,8 +165,16 @@ impl Preparer {
                             script.name
                         );
 
+                        // deserialize the script
+                        let mut code = vec![];
+                        script
+                            .script
+                            .serialize_for_version(bytecode_version, &mut code)
+                            .unwrap_or_else(|why| {
+                                panic!("unable to deserialize a coupled CompiledScript")
+                            });
+                        let exists = scripts_coupled.insert(name.clone(), code);
                         // NOTE: simplified assumption that every script has a different name
-                        let exists = scripts_coupled.insert(name.clone(), script.script.clone());
                         assert!(exists.is_none());
 
                         let ident = EntrypointIdent::Script(name);
@@ -429,16 +448,33 @@ script {{
             .unwrap_or_else(|why| panic!("unable to build the autogen package: {why}"));
         log::info!("autogen package built successfully");
 
+        let bytecode_version = pkg_built
+            .package
+            .compiled_package_info
+            .build_flags
+            .compiler_config
+            .bytecode_version;
+
         // get the scripts
         for unit in pkg_built.package.root_compiled_units {
             let path = unit.source_path;
             match unit.unit {
                 CompiledUnitEnum::Module(_) => panic!("unexpected module in the autogen package"),
                 CompiledUnitEnum::Script(script) => {
+                    // deserialize the script
+                    let mut code = vec![];
+                    script
+                        .script
+                        .serialize_for_version(bytecode_version, &mut code)
+                        .unwrap_or_else(|why| {
+                            panic!("unable to deserialize an autogen CompiledScript")
+                        });
+
+                    // save the deserialized code
                     let ident = script_to_ident.remove(&path).unwrap_or_else(|| {
                         panic!("failed to find the ident for script {}", script.name)
                     });
-                    let exists = self.scripts_autogen.insert(ident, script.script);
+                    let exists = self.scripts_autogen.insert(ident, code);
                     assert!(exists.is_none());
                 },
             }
@@ -523,12 +559,13 @@ script {{
     }
 
     /// Generate a transaction payload out of an entry point
-    pub fn random_payload(&self, ident: &EntrypointIdent) {
+    pub fn generate_random_payload(&self, ident: &EntrypointIdent) -> TransactionPayload {
         let details = self
             .entrypoints
             .get(ident)
             .unwrap_or_else(|| panic!("unable to find entrypoint: {ident}"));
 
+        // generate arguments
         let args: Vec<_> = details
             .params
             .iter()
@@ -538,5 +575,33 @@ script {{
                     .expect("MoveValue must be serializable")
             })
             .collect();
+
+        // construct the payload
+        match ident {
+            EntrypointIdent::EntryFunction(name) => {
+                let (mid, fid) = name.to_module_and_function_id();
+                TransactionPayload::EntryFunction(EntryFunction::new(mid, fid, vec![], args))
+            },
+            EntrypointIdent::Script(name) => TransactionPayload::Script(Script::new(
+                self.scripts_coupled
+                    .get(name)
+                    .unwrap_or_else(|| panic!("unable to find coupled script {name}"))
+                    .clone(),
+                vec![],
+                args.into_iter()
+                    .map(TransactionArgument::Serialized)
+                    .collect(),
+            )),
+            EntrypointIdent::PublicFunction(name) => TransactionPayload::Script(Script::new(
+                self.scripts_autogen
+                    .get(name)
+                    .unwrap_or_else(|| panic!("unable to find autogen script {name}"))
+                    .clone(),
+                vec![],
+                args.into_iter()
+                    .map(TransactionArgument::Serialized)
+                    .collect(),
+            )),
+        }
     }
 }
