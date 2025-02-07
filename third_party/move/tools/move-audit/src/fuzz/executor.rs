@@ -512,8 +512,10 @@ impl TracingExecutor {
     }
 
     /// Run a transaction with a random sender
-    pub fn run_payload_with_random_sender(&mut self, payload: TransactionPayload) -> Result<()> {
-        self.execute_transaction(self.address_registry.random_address(), payload)?;
-        Ok(())
+    pub fn run_payload_with_random_sender(
+        &mut self,
+        payload: TransactionPayload,
+    ) -> Result<(VMStatus, TransactionOutput)> {
+        self.execute_transaction(self.address_registry.random_address(), payload)
     }
 }
