@@ -63,6 +63,10 @@ pub enum AuditCommand {
         #[clap(flatten)]
         pkg_filter: FilterPackage,
 
+        /// Number of users in the system
+        #[clap(long, default_value = "3")]
+        num_users: usize,
+
         /// Type recursion depth
         #[clap(long, default_value = "2")]
         type_recursion_depth: usize,
@@ -235,6 +239,7 @@ fn cmd_fuzz(
     workdir: &Path,
     project: Project,
     pkg_filter: FilterPackage,
+    num_users: usize,
     type_recursion_depth: usize,
 ) -> Result<()> {
     // fuzzing is only supported on the latest compiler
@@ -321,6 +326,7 @@ authors = []
         named_accounts,
         language,
         autogen_manifest,
+        num_users,
         type_recursion_depth,
     )
 }
@@ -479,9 +485,16 @@ pub fn run_on(
         },
         AuditCommand::Fuzz {
             pkg_filter,
+            num_users,
             type_recursion_depth,
         } => {
-            cmd_fuzz(&workdir, project, pkg_filter, type_recursion_depth)?;
+            cmd_fuzz(
+                &workdir,
+                project,
+                pkg_filter,
+                num_users,
+                type_recursion_depth,
+            )?;
         },
     }
 
