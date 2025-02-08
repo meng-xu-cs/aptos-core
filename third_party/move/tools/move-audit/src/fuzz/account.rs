@@ -67,6 +67,13 @@ impl Display for AddressDetails {
     }
 }
 
+/// Type of this address
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
+pub enum AddressKind {
+    Named(NamedAddressKind),
+    User,
+}
+
 /// Address registry
 pub struct AddressRegistry {
     /// mapping from address to address/account details
@@ -205,13 +212,21 @@ impl AddressRegistry {
         }
     }
 
-    /// Get a random address in this system
-    pub fn random_address(&self) -> AccountAddress {
-        // TODO: maybe use weighted randomness for different account types?
-        *self
-            .details
-            .keys()
-            .choose(&mut rand::thread_rng())
-            .expect("at least one account to choose from")
+    /// Return all addresses stored in this registry, sorted by kind
+    pub fn all_addresses_by_kind(&self) -> BTreeMap<AddressKind, BTreeSet<AccountAddress>> {
+        let mut mapping: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
+        for (addr, details) in &self.details {
+            let inserted = match details {
+                AddressDetails::Named { kind, .. } => mapping
+                    .entry(AddressKind::Named(*kind))
+                    .or_default()
+                    .insert(*addr),
+                AddressDetails::User { .. } => {
+                    mapping.entry(AddressKind::User).or_default().insert(*addr)
+                },
+            };
+            assert!(inserted);
+        }
+        mapping
     }
 }

@@ -1,6 +1,6 @@
 use crate::{
     common::PkgDefinition,
-    fuzz::account::{AddressRegistry, NamedAddressKind},
+    fuzz::account::{AddressKind, AddressRegistry, NamedAddressKind},
 };
 use anyhow::{bail, Result};
 use aptos_cached_packages::aptos_stdlib;
@@ -43,7 +43,7 @@ use move_package::{
 };
 use move_symbol_pool::Symbol;
 use serde::{de::DeserializeOwned, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Default APT fund per each new account (10M, with 8 decimals)
 const INITIAL_APT_BALANCE: u64 = 1_000_000_000_000_000;
@@ -517,11 +517,17 @@ impl TracingExecutor {
         self.create_account(account, INITIAL_APT_BALANCE);
     }
 
-    /// Run a transaction with a random sender
-    pub fn run_payload_with_random_sender(
+    /// Return all addresses known to the executor, sorted by kind
+    pub fn all_addresses_by_kind(&self) -> BTreeMap<AddressKind, BTreeSet<AccountAddress>> {
+        self.address_registry.all_addresses_by_kind()
+    }
+
+    /// Run a transaction with a sender
+    pub fn run_payload_with_sender(
         &mut self,
+        sender: AccountAddress,
         payload: TransactionPayload,
     ) -> Result<(VMStatus, TransactionOutput)> {
-        self.execute_transaction(self.address_registry.random_address(), payload)
+        self.execute_transaction(sender, payload)
     }
 }

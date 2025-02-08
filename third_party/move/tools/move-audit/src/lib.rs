@@ -63,6 +63,10 @@ pub enum AuditCommand {
         #[clap(flatten)]
         pkg_filter: FilterPackage,
 
+        /// Seed for all randomness in the fuzzing process
+        #[clap(long)]
+        seed: Option<u64>,
+
         /// Number of users in the system
         #[clap(long, default_value = "3")]
         num_users: usize,
@@ -239,6 +243,7 @@ fn cmd_fuzz(
     workdir: &Path,
     project: Project,
     pkg_filter: FilterPackage,
+    seed: Option<u64>,
     num_users: usize,
     type_recursion_depth: usize,
 ) -> Result<()> {
@@ -280,6 +285,9 @@ fn cmd_fuzz(
             PkgDeclaration::Dependency(_) => PkgDefinition::Dependency(pkg_built),
             PkgDeclaration::Framework(_) => PkgDefinition::Framework(pkg_built),
         };
+
+        // NOTE: as `pkgs` are in the topological order of the dependency graph,
+        // `pkg_defs` will also be a topological order as well
         pkg_defs.push(pkg_def);
     }
 
@@ -326,6 +334,7 @@ authors = []
         named_accounts,
         language,
         autogen_manifest,
+        seed,
         num_users,
         type_recursion_depth,
     )
@@ -485,6 +494,7 @@ pub fn run_on(
         },
         AuditCommand::Fuzz {
             pkg_filter,
+            seed,
             num_users,
             type_recursion_depth,
         } => {
@@ -492,6 +502,7 @@ pub fn run_on(
                 &workdir,
                 project,
                 pkg_filter,
+                seed,
                 num_users,
                 type_recursion_depth,
             )?;
