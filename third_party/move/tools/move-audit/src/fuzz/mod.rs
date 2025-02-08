@@ -14,6 +14,7 @@ mod executor;
 mod function;
 mod ident;
 mod model;
+mod mutator;
 mod prep;
 mod typing;
 
@@ -42,13 +43,13 @@ pub fn run_on(
     named_accounts: BTreeMap<String, Account>,
     language: LanguageSetting,
     autogen_manifest: PkgManifest,
+    seed: Option<u64>,
     num_users: usize,
-    type_recursion_depth: usize,
+    _type_recursion_depth: usize,
 ) -> Result<()> {
     // initialize the tracing executor
     let mut executor = executor::TracingExecutor::new();
     for pkg in &pkg_defs {
-        // process packages in the order of their dependency chain
         executor.add_new_package(pkg)?
     }
     for _ in 0..num_users {
@@ -63,6 +64,9 @@ pub fn run_on(
     // TODO: replace with advanced processing when ready
     let mut preparer = prep::Preparer::new(&pkg_defs);
     preparer.generate_scripts(&named_accounts, language, &autogen_manifest);
+
+    // initialize the mutator
+    let mut mutator = mutator::Mutator::new(seed.unwrap_or(0), executor.all_addresses_by_kind());
 
     // stage 1: per-function fuzzing
     let all_entrypoints = preparer.all_entry_idents();
@@ -80,8 +84,9 @@ pub fn run_on(
     loop {
         for ident in &all_entrypoints {
             log::debug!("running transaction for {ident}");
-            let payload = preparer.generate_random_payload(ident);
-            let (status, _) = executor.run_payload_with_random_sender(payload)?;
+            let sender = mutator.random_signer();
+            let payload = preparer.generate_random_payload(&mut mutator, ident);
+            let (status, _) = executor.run_payload_with_sender(sender, payload)?;
             match status {
                 VMStatus::Executed => stats.get_mut(&ExecStatus::Success).unwrap().add_assign(1),
                 VMStatus::Error { .. } => stats.get_mut(&ExecStatus::Error).unwrap().add_assign(1),
