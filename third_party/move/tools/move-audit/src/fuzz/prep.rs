@@ -3,6 +3,7 @@ use crate::{
     deps::PkgManifest,
     fuzz::{
         ident::{DatatypeIdent, FunctionIdent},
+        mutator::Mutator,
         typing::{DatatypeContent, DatatypeRegistry, TypeBase, TypeRef, VectorVariant},
     },
     package, LanguageSetting,
@@ -480,77 +481,12 @@ script {{
         self.entrypoints.keys().cloned().collect()
     }
 
-    /// Randomly generate a Move value based on a runtime type
-    fn generate_random_value(&self, ty: &RuntimeType) -> MoveValue {
-        match ty {
-            RuntimeType::Bool => MoveValue::Bool(rand::random()),
-            // TODO: give special values more weight for integers
-            RuntimeType::U8 => MoveValue::U8(rand::random()),
-            RuntimeType::U16 => MoveValue::U16(rand::random()),
-            RuntimeType::U32 => MoveValue::U32(rand::random()),
-            RuntimeType::U64 => MoveValue::U64(rand::random()),
-            RuntimeType::U128 => MoveValue::U128(rand::random()),
-            RuntimeType::U256 => MoveValue::U256(u256::U256::from_le_bytes(&rand::random())),
-            RuntimeType::Bitvec => {
-                let size = rand::random::<u8>() % 10;
-                MoveValue::Vector(
-                    (0..size)
-                        .map(|_| self.generate_random_value(&RuntimeType::Bool))
-                        .collect(),
-                )
-            },
-            RuntimeType::String => {
-                // TODO: use the string dictionary
-                MoveValue::Vector(vec![])
-            },
-            RuntimeType::Address => {
-                // TODO: use the address dictionary
-                MoveValue::Address(AccountAddress::ZERO)
-            },
-            RuntimeType::Signer => {
-                // TODO: use the signer dictionary
-                MoveValue::Signer(AccountAddress::ZERO)
-            },
-            RuntimeType::Option(inner) => {
-                if rand::random() {
-                    MoveValue::Vector(vec![])
-                } else {
-                    MoveValue::Vector(vec![self.generate_random_value(inner)])
-                }
-            },
-            RuntimeType::Vector(element) => {
-                let size = rand::random::<u8>() % 10;
-                MoveValue::Vector(
-                    (0..size)
-                        .map(|_| self.generate_random_value(element))
-                        .collect(),
-                )
-            },
-            RuntimeType::Object(..) => {
-                // TODO: use the object dictionary
-                MoveValue::Address(AccountAddress::ZERO)
-            },
-            RuntimeType::Struct(fields) => MoveValue::Struct(MoveStruct::Runtime(
-                fields
-                    .iter()
-                    .map(|t| self.generate_random_value(t))
-                    .collect(),
-            )),
-            RuntimeType::Enum(variants) => {
-                let index = rand::random::<usize>() % variants.len();
-                MoveValue::Struct(MoveStruct::RuntimeVariant(
-                    index as u16,
-                    variants[index]
-                        .iter()
-                        .map(|t| self.generate_random_value(t))
-                        .collect(),
-                ))
-            },
-        }
-    }
-
     /// Generate a transaction payload out of an entry point
-    pub fn generate_random_payload(&self, ident: &EntrypointIdent) -> TransactionPayload {
+    pub fn generate_random_payload(
+        &self,
+        mutator: &mut Mutator,
+        ident: &EntrypointIdent,
+    ) -> TransactionPayload {
         let details = self
             .entrypoints
             .get(ident)
@@ -561,7 +497,8 @@ script {{
             .params
             .iter()
             .map(|(_, ty)| {
-                self.generate_random_value(ty)
+                mutator
+                    .random_value(ty)
                     .simple_serialize()
                     .expect("MoveValue must be serializable")
             })
