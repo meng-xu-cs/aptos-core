@@ -34,6 +34,7 @@ impl Display for NamedAddressKind {
 }
 
 /// Details about the nature of an address
+#[derive(Debug, Clone)]
 pub enum AddressDetails {
     /// a named address declared in Move package manifest
     Named {
@@ -75,6 +76,7 @@ pub enum AddressKind {
 }
 
 /// Address registry
+#[derive(Debug, Clone)]
 pub struct AddressRegistry {
     /// mapping from address to address/account details
     details: BTreeMap<AccountAddress, AddressDetails>,
