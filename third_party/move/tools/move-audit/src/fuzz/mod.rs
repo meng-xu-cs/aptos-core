@@ -4,8 +4,7 @@ use crate::{
 };
 use anyhow::Result;
 use itertools::Itertools;
-use move_core_types::vm_status::VMStatus;
-use std::{collections::BTreeMap, fmt::Display, ops::AddAssign};
+use std::{collections::BTreeMap, ops::AddAssign};
 
 mod account;
 mod canvas;
@@ -15,27 +14,9 @@ mod function;
 mod ident;
 mod model;
 mod mutator;
+mod oneshot;
 mod prep;
 mod typing;
-
-#[derive(Ord, PartialOrd, Eq, PartialEq)]
-enum ExecStatus {
-    Success,
-    AbortIntrinsic,
-    AbortDeclared,
-    Error,
-}
-
-impl Display for ExecStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ExecStatus::Success => write!(f, "success"),
-            ExecStatus::AbortIntrinsic => write!(f, "abort-i"),
-            ExecStatus::AbortDeclared => write!(f, "abort-c"),
-            ExecStatus::Error => write!(f, "error"),
-        }
-    }
-}
 
 /// Entrypoint for the fuzzer
 pub fn run_on(
@@ -65,40 +46,21 @@ pub fn run_on(
     let mut preparer = prep::Preparer::new(&pkg_defs);
     preparer.generate_scripts(&named_accounts, language, &autogen_manifest);
 
-    // initialize the mutator
-    let mut mutator = mutator::Mutator::new(seed.unwrap_or(0), executor.all_addresses_by_kind());
-
     // stage 1: per-function fuzzing
     let all_entrypoints = preparer.all_entry_idents();
 
-    let mut stats: BTreeMap<_, usize> = [
-        (ExecStatus::Success, 0),
-        (ExecStatus::AbortIntrinsic, 0),
-        (ExecStatus::AbortDeclared, 0),
-        (ExecStatus::Error, 0),
-    ]
-    .into_iter()
-    .collect();
-
+    let mut stats: BTreeMap<_, usize> = BTreeMap::new();
     let mut i = 0;
     loop {
         for ident in &all_entrypoints {
             log::debug!("running transaction for {ident}");
-            let sender = mutator.random_signer();
-            let payload = preparer.generate_random_payload(&mut mutator, ident);
-            let (status, _) = executor.run_payload_with_sender(sender, payload)?;
-            match status {
-                VMStatus::Executed => stats.get_mut(&ExecStatus::Success).unwrap().add_assign(1),
-                VMStatus::Error { .. } => stats.get_mut(&ExecStatus::Error).unwrap().add_assign(1),
-                VMStatus::ExecutionFailure { .. } => stats
-                    .get_mut(&ExecStatus::AbortIntrinsic)
-                    .unwrap()
-                    .add_assign(1),
-                VMStatus::MoveAbort { .. } => stats
-                    .get_mut(&ExecStatus::AbortDeclared)
-                    .unwrap()
-                    .add_assign(1),
-            }
+            let mut fuzzer =
+                oneshot::OneshotFuzzer::new(&preparer, executor.clone(), seed.unwrap_or(0));
+            let status = fuzzer.run_one(ident)?;
+            stats
+                .entry(status)
+                .and_modify(|t| t.add_assign(1))
+                .or_insert(1);
         }
         i += 1;
 

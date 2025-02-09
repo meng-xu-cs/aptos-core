@@ -43,7 +43,11 @@ use move_package::{
 };
 use move_symbol_pool::Symbol;
 use serde::{de::DeserializeOwned, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::mpsc,
+    thread,
+};
 
 /// Default APT fund per each new account (10M, with 8 decimals)
 const INITIAL_APT_BALANCE: u64 = 1_000_000_000_000_000;
@@ -69,6 +73,7 @@ impl PackageHooks for AptosPackageHooks {
 }
 
 /// Gas consumption profile
+#[derive(Debug, Clone)]
 enum GasProfile {
     Constant {
         price_per_gas_unit: u64,
@@ -89,6 +94,7 @@ impl GasProfile {
 }
 
 /// A stateful executor
+#[derive(Debug, Clone)]
 pub struct TracingExecutor {
     /// memory-backed data store
     data_store: FakeDataStore,
@@ -366,8 +372,8 @@ impl TracingExecutor {
         &mut self,
         sender: AccountAddress,
         payload: TransactionPayload,
-    ) -> Result<TransactionStatus> {
-        let (_vm_status, output) = self.execute_transaction(sender, payload)?;
+    ) -> Result<(VMStatus, TransactionStatus)> {
+        let (vm_status, output) = self.execute_transaction(sender, payload)?;
         let (write_set, events, _gas_used, txn_status, _txn_misc) = output.unpack();
         match txn_status {
             TransactionStatus::Keep(_) => {
@@ -379,7 +385,7 @@ impl TracingExecutor {
                 bail!("unexpected retry status for transaction execution");
             },
         }
-        Ok(txn_status)
+        Ok((vm_status, txn_status))
     }
 
     /// Execute a transaction with output (if any) committed, expect a success
@@ -388,10 +394,17 @@ impl TracingExecutor {
         sender: AccountAddress,
         payload: TransactionPayload,
     ) -> Result<()> {
-        let status = self.execute_transaction_and_commit_output(sender, payload)?;
-        match status {
-            TransactionStatus::Keep(ExecutionStatus::Success) => Ok(()),
-            _ => bail!("transaction failed unexpectedly with status: {:?}", status),
+        let (vm_status, txn_status) =
+            self.execute_transaction_and_commit_output(sender, payload)?;
+        match txn_status {
+            TransactionStatus::Keep(ExecutionStatus::Success) => {
+                assert!(matches!(vm_status, VMStatus::Executed));
+                Ok(())
+            },
+            _ => bail!(
+                "transaction failed unexpectedly with status: {:?}",
+                txn_status
+            ),
         }
     }
 
@@ -527,7 +540,7 @@ impl TracingExecutor {
         &mut self,
         sender: AccountAddress,
         payload: TransactionPayload,
-    ) -> Result<(VMStatus, TransactionOutput)> {
-        self.execute_transaction(sender, payload)
+    ) -> Result<(VMStatus, TransactionStatus)> {
+        self.execute_transaction_and_commit_output(sender, payload)
     }
 }
