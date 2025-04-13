@@ -1,3 +1,6 @@
+// Copyright (c) Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{
     common::{Account, LanguageSetting, PkgDeclaration},
     Project,
@@ -8,7 +11,7 @@ use aptos_framework::{
     natives::code::{ModuleMetadata, MoveOption, PackageDep, PackageMetadata, UpgradePolicy},
     zip_metadata_str, UPGRADE_POLICY_CUSTOM_FIELD,
 };
-use move_compiler::compiled_unit::CompiledUnit;
+use legacy_move_compiler::compiled_unit::CompiledUnit;
 use move_core_types::account_address::AccountAddress;
 use move_package::{
     compilation::compiled_package::CompiledPackage,

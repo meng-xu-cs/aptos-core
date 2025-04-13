@@ -1,6 +1,8 @@
+// Copyright (c) Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
+
 mod common;
 mod deps;
-mod fuzz;
 mod package;
 mod simulator;
 mod subexec;
@@ -55,25 +57,6 @@ pub enum AuditCommand {
         /// Use realistic gas settings
         #[clap(long)]
         realistic_gas: bool,
-    },
-
-    /// Run fuzz testing on the project
-    Fuzz {
-        /// Mark the main packages to fuzz
-        #[clap(flatten)]
-        pkg_filter: FilterPackage,
-
-        /// Seed for all randomness in the fuzzing process
-        #[clap(long)]
-        seed: Option<u64>,
-
-        /// Number of users in the system
-        #[clap(long, default_value = "3")]
-        num_users: usize,
-
-        /// Type recursion depth
-        #[clap(long, default_value = "2")]
-        type_recursion_depth: usize,
     },
 }
 
@@ -239,107 +222,6 @@ fn cmd_exec(project: &Project, runbook: &Path, realistic_gas: bool) -> Result<()
     result
 }
 
-fn cmd_fuzz(
-    workdir: &Path,
-    project: Project,
-    pkg_filter: FilterPackage,
-    seed: Option<u64>,
-    num_users: usize,
-    type_recursion_depth: usize,
-) -> Result<()> {
-    // fuzzing is only supported on the latest compiler
-    if !matches!(project.language.version, LanguageVersion::V2_1) {
-        bail!(
-            "fuzzing is not supported on language version: {}",
-            project.language.version
-        );
-    }
-
-    // we need to see all packages unless the package is explicitly excluded
-    if !pkg_filter.include_framework {
-        bail!("fuzzer requires the `--include-framework` flag");
-    }
-    if !pkg_filter.include_deps {
-        bail!("fuzzer requires the `--include-deps` flag");
-    }
-
-    // build all packages initially, this is also a sanity check on the packages
-    let Project {
-        pkgs,
-        named_accounts,
-        language,
-    } = project;
-
-    let mut autogen_deps = BTreeMap::new();
-    let mut pkg_defs = vec![];
-    for pkg_decl in pkg_filter.apply(pkgs)? {
-        let manifest = pkg_decl.as_manifest();
-        let existing = autogen_deps.insert(manifest.name.clone(), manifest.clone());
-        assert!(existing.is_none());
-
-        log::debug!("compiling package {}", manifest.name);
-        let pkg_built = package::build(manifest, &named_accounts, language, false)?;
-
-        let pkg_def = match pkg_decl {
-            PkgDeclaration::Primary(_) => PkgDefinition::Primary(pkg_built),
-            PkgDeclaration::Dependency(_) => PkgDefinition::Dependency(pkg_built),
-            PkgDeclaration::Framework(_) => PkgDefinition::Framework(pkg_built),
-        };
-
-        // NOTE: as `pkgs` are in the topological order of the dependency graph,
-        // `pkg_defs` will also be a topological order as well
-        pkg_defs.push(pkg_def);
-    }
-
-    // prepare the autogen package directory to host derived Move code
-    let autogen_dir = workdir.join("autogen");
-    if autogen_dir.exists() {
-        bail!("autogen directory already exists");
-    }
-    fs::create_dir_all(&autogen_dir)?;
-
-    let autogen_name = "Autogen".to_string();
-    let autogen_deps_str = autogen_deps
-        .iter()
-        .map(|(key, val)| format!("{key} = {{ local = \"{}\" }}", val.path.display()))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let autogen_toml = format!(
-        r#"
-[package]
-name = "{autogen_name}"
-version = "1.0.0"
-upgrade_policy = "compatible"
-authors = []
-
-[dependencies]
-{autogen_deps_str}
-"#
-    );
-    fs::write(autogen_dir.join("Move.toml"), autogen_toml)?;
-    fs::create_dir(autogen_dir.join("sources"))?;
-
-    // create a manifest for the autogen package
-    let autogen_manifest = PkgManifest {
-        name: autogen_name,
-        path: autogen_dir,
-        version: (1, 0, 0).into(),
-        deps: autogen_deps,
-        named_addresses: BTreeMap::new(),
-    };
-
-    // done with preparation, now call the fuzzer
-    fuzz::run_on(
-        pkg_defs,
-        named_accounts,
-        language,
-        autogen_manifest,
-        seed,
-        num_users,
-        type_recursion_depth,
-    )
-}
-
 /// Entrypoint on multi-package auditing
 pub fn run_on(
     path: PathBuf,
@@ -491,21 +373,6 @@ pub fn run_on(
             for target in targets {
                 cmd_exec(&project, &target, realistic_gas)?;
             }
-        },
-        AuditCommand::Fuzz {
-            pkg_filter,
-            seed,
-            num_users,
-            type_recursion_depth,
-        } => {
-            cmd_fuzz(
-                &workdir,
-                project,
-                pkg_filter,
-                seed,
-                num_users,
-                type_recursion_depth,
-            )?;
         },
     }
 
