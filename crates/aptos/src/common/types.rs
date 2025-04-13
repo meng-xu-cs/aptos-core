@@ -2094,6 +2094,11 @@ impl TransactionOptions {
             TransactionStatus::Discard(_) | TransactionStatus::Retry => None,
         };
 
+        // printout the events emitted in this transaction
+        vm_output.events().iter().for_each(|(event, _)| {
+            println!("[event] {}", event.type_tag().to_canonical_string());
+        });
+
         let summary = TransactionSummary {
             transaction_hash: hash.into(),
             gas_used: Some(vm_output.gas_used()),
