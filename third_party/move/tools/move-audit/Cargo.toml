@@ -39,7 +39,7 @@ aptos-vm-environment = { path = "../../../../aptos-move/aptos-vm-environment" }
 aptos-vm-logging = { path = "../../../../aptos-move/aptos-vm-logging" }
 aptos-vm-types = { path = "../../../../aptos-move/aptos-vm-types" }
 move-binary-format = { path = "../../move-binary-format" }
-move-compiler = { path = "../../move-compiler" }
+move-compiler-v2 = { path = "../../move-compiler-v2" }
 move-core-types = { path = "../../move-core/types" }
 move-model = { path = "../../move-model" }
 move-package = { path = "../move-package" }
