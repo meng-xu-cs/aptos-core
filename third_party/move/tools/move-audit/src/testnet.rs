@@ -1,3 +1,6 @@
+// Copyright (c) Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{
     common::{Account, Project, TxnArg, TxnArgType, TxnArgTypeWithRef},
     package,
@@ -6,9 +9,9 @@ use crate::{
 use anyhow::{anyhow, bail, Result};
 use aptos_crypto::{ed25519::Ed25519PrivateKey, HashValue, PrivateKey, Uniform};
 use aptos_types::transaction::authenticator::AuthenticationKey;
+use legacy_move_compiler::compiled_unit::CompiledUnit;
 use log::{debug, error, info};
 use move_binary_format::{access::ModuleAccess, CompiledModule};
-use move_compiler::compiled_unit::CompiledUnit;
 use move_core_types::{ability::AbilitySet, account_address::AccountAddress};
 use move_package::{
     compilation::compiled_package::{CompiledPackage, CompiledUnitWithSource},
