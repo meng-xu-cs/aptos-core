@@ -1,3 +1,6 @@
+// Copyright (c) Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::deps::PkgManifest;
 use anyhow::{bail, Result};
 use aptos_crypto::{ed25519::Ed25519PrivateKey, PrivateKey};
@@ -321,12 +324,14 @@ impl LanguageSetting {
                 LanguageVersion::V2_0 => CompilerVersion::V2_0,
                 LanguageVersion::V2_1 => CompilerVersion::V2_0,
                 LanguageVersion::V2_2 => CompilerVersion::V2_1,
+                LanguageVersion::V2_3 => CompilerVersion::V2_1,
             }),
             bytecode_version: Some(match version {
                 LanguageVersion::V1 => file_format_common::VERSION_6,
                 LanguageVersion::V2_0 => file_format_common::VERSION_7,
                 LanguageVersion::V2_1 => file_format_common::VERSION_7,
                 LanguageVersion::V2_2 => file_format_common::VERSION_8,
+                LanguageVersion::V2_3 => file_format_common::VERSION_8,
             }),
             experiments,
         }
@@ -368,6 +373,14 @@ impl LanguageSetting {
             LanguageVersion::V2_2 => command.args([
                 "--language-version",
                 "2.2",
+                "--compiler-version",
+                "2.1",
+                "--bytecode-version",
+                "8",
+            ]),
+            LanguageVersion::V2_3 => command.args([
+                "--language-version",
+                "2.3",
                 "--compiler-version",
                 "2.1",
                 "--bytecode-version",
