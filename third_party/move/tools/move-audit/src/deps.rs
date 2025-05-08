@@ -513,26 +513,27 @@ pub fn resolve(
                     (PkgNamedAddr::Unset, PkgNamedAddr::Devel(a)) => {
                         *existing = PkgNamedAddr::Devel(a);
                     },
+                    (PkgNamedAddr::Unset, PkgNamedAddr::Fixed(a)) => {
+                        *existing = PkgNamedAddr::Fixed(a);
+                    },
+
                     (PkgNamedAddr::Devel(_), PkgNamedAddr::Unset) => (),
                     (PkgNamedAddr::Devel(a1), PkgNamedAddr::Devel(a2)) => {
                         if a1 != a2 {
-                            bail!(
-                                "conflicting dev assignment for named address: {}",
-                                addr_name
-                            );
+                            *existing = PkgNamedAddr::Unset;
                         }
                     },
+                    (PkgNamedAddr::Devel(_), PkgNamedAddr::Fixed(a)) => {
+                        *existing = PkgNamedAddr::Fixed(a);
+                    },
+
                     (PkgNamedAddr::Fixed(a1), PkgNamedAddr::Fixed(a2)) => {
                         if a1 != a2 {
                             bail!("conflicting assignment for named address: {}", addr_name);
                         }
                     },
-                    (PkgNamedAddr::Unset, PkgNamedAddr::Fixed(_))
-                    | (PkgNamedAddr::Devel(_), PkgNamedAddr::Fixed(_))
-                    | (PkgNamedAddr::Fixed(_), PkgNamedAddr::Devel(_))
-                    | (PkgNamedAddr::Fixed(_), PkgNamedAddr::Unset) => {
-                        bail!("conflicting named address declaration: {}", addr_name);
-                    },
+                    (PkgNamedAddr::Fixed(_), PkgNamedAddr::Devel(_))
+                    | (PkgNamedAddr::Fixed(_), PkgNamedAddr::Unset) => (),
                 },
             }
         }
