@@ -820,15 +820,24 @@ pub fn move_unit_test(
         .env(ENV_APTOS_DISABLE_TELEMETRY, "1")
         .current_dir(pkg_dir);
 
-    let result = SubExec::invoke(command);
-    if coverage.is_none() {
-        return result;
-    }
+    // short-circuit if coverage is not requested
+    let cov_output_path = match coverage {
+        None => return SubExec::invoke(command),
+        Some(p) => p,
+    };
 
     // extra processing for coverage
-    let cov_output_path = coverage.unwrap();
     fs::create_dir_all(cov_output_path)?;
 
+    let (result, output) = SubExec::output_stdout(command)?;
+    if !result {
+        return Ok(result);
+    }
+
+    // save the coverage summary
+    fs::write(cov_output_path.join("cov-summary"), output.join("\n"))?;
+
+    // run per-module coverage analysis
     for module in built_pkg.modules() {
         let name = module.name();
 
