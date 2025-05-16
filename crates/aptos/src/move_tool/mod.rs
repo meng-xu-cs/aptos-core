@@ -189,7 +189,7 @@ pub struct AuditOptions {
     subdir: Vec<PathBuf>,
 
     /// Choose a language version
-    #[clap(long, default_value = "2.1+")]
+    #[clap(long, default_value = "2.1")]
     language: move_audit::LanguageSetting,
 
     /// Named alias declarations

@@ -831,6 +831,8 @@ pub fn move_unit_test(
 
     for module in built_pkg.modules() {
         let name = module.name();
+
+        // source level
         let mut command = Command::new(APTOS_BIN.as_path());
         command.args(["move", "coverage", "source", "--module", name.as_str()]);
         command.args(["--dev", "--skip-fetch-latest-git-deps"]);
@@ -844,12 +846,34 @@ pub fn move_unit_test(
 
         let (success, output) = SubExec::output_stdout(command)?;
         if !success {
-            bail!("failed to generate the coverage report for module {}", name);
+            bail!("failed to generate the source coverage for module {}", name);
         }
-
-        // output the summary
         fs::write(
-            cov_output_path.join(format!("{name}.cov")),
+            cov_output_path.join(format!("{name}.src.cov")),
+            output.join("\n"),
+        )?;
+
+        // bytecode level
+        let mut command = Command::new(APTOS_BIN.as_path());
+        command.args(["move", "coverage", "bytecode", "--module", name.as_str()]);
+        command.args(["--dev", "--skip-fetch-latest-git-deps"]);
+        command
+            .arg("--named-addresses")
+            .arg(named_address_pairs.join(","));
+        language.derive_cli_options(&mut command);
+        command
+            .env(ENV_APTOS_DISABLE_TELEMETRY, "1")
+            .current_dir(pkg_dir);
+
+        let (success, output) = SubExec::output_stdout(command)?;
+        if !success {
+            bail!(
+                "failed to generate the bytecode coverage for module {}",
+                name
+            );
+        }
+        fs::write(
+            cov_output_path.join(format!("{name}.asm.cov")),
             output.join("\n"),
         )?;
     }
