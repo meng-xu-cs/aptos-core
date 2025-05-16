@@ -1,9 +1,13 @@
+// Copyright (c) Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{
     common::{Account, LanguageSetting, TxnArg, TxnArgType, TxnArgTypeWithRef},
     subexec::SubExec,
 };
 use anyhow::{anyhow, bail, Result};
 use aptos_crypto::{ed25519::Ed25519PrivateKey, PrivateKey};
+use aptos_framework::BuiltPackage;
 use aptos_types::transaction::authenticator::AuthenticationKey;
 use lazy_static::lazy_static;
 use log::{debug, info};
@@ -18,6 +22,7 @@ use move_binary_format::{
 use move_core_types::{ability::AbilitySet, account_address::AccountAddress};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
     path::{Path, PathBuf},
     process::Command,
     sync::{Arc, RwLock},
@@ -790,6 +795,8 @@ pub fn move_unit_test(
     named_addresses: &BTreeMap<String, AccountAddress>,
     language: LanguageSetting,
     filter: Option<&str>,
+    built_pkg: &BuiltPackage,
+    coverage: Option<&Path>,
 ) -> Result<bool> {
     let named_address_pairs: Vec<_> = named_addresses
         .iter()
@@ -806,11 +813,49 @@ pub fn move_unit_test(
     if let Some(pattern) = filter {
         command.args(["--filter", pattern]);
     }
+    if coverage.is_some() {
+        command.args(["--coverage"]);
+    }
     command
         .env(ENV_APTOS_DISABLE_TELEMETRY, "1")
         .current_dir(pkg_dir);
 
-    SubExec::invoke(command)
+    let result = SubExec::invoke(command);
+    if coverage.is_none() {
+        return result;
+    }
+
+    // extra processing for coverage
+    let cov_output_path = coverage.unwrap();
+    fs::create_dir_all(cov_output_path)?;
+
+    for module in built_pkg.modules() {
+        let name = module.name();
+        let mut command = Command::new(APTOS_BIN.as_path());
+        command.args(["move", "coverage", "source", "--module", name.as_str()]);
+        command.args(["--dev", "--skip-fetch-latest-git-deps"]);
+        command
+            .arg("--named-addresses")
+            .arg(named_address_pairs.join(","));
+        language.derive_cli_options(&mut command);
+        command
+            .env(ENV_APTOS_DISABLE_TELEMETRY, "1")
+            .current_dir(pkg_dir);
+
+        let (success, output) = SubExec::output_stdout(command)?;
+        if !success {
+            bail!("failed to generate the coverage report for module {}", name);
+        }
+
+        // output the summary
+        fs::write(
+            cov_output_path.join(format!("{name}.cov")),
+            output.join("\n"),
+        )?;
+    }
+
+    // done
+    Ok(true)
 }
 
 /// Shortcut to move function: format source code files

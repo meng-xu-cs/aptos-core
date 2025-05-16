@@ -1,3 +1,6 @@
+// Copyright (c) Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
+
 use anyhow::{anyhow, bail, Result};
 use command_group::{CommandGroup, GroupChild, Signal, UnixChildExt};
 use log::{error, trace};
@@ -121,7 +124,7 @@ impl SubExec {
         Ok(status.success())
     }
 
-    /// Shortcut: execution to output
+    /// Shortcut: execution to output (stdout)
     pub fn output_stdout(command: Command) -> Result<(bool, Vec<String>)> {
         let stdout = Arc::new(RwLock::new(vec![]));
         let status = Self::run(command, Some(Arc::clone(&stdout)), None)?.wait()?;
@@ -131,6 +134,19 @@ impl SubExec {
             .into_inner()
             .expect("lock not poisoned");
         Ok((status.success(), stream_stdout))
+    }
+
+    /// Shortcut: execution to output (stderr)
+    #[allow(dead_code)]
+    pub fn output_stderr(command: Command) -> Result<(bool, Vec<String>)> {
+        let stderr = Arc::new(RwLock::new(vec![]));
+        let status = Self::run(command, None, Some(Arc::clone(&stderr)))?.wait()?;
+
+        let stream_stderr = Arc::into_inner(stderr)
+            .expect("single reference of arc")
+            .into_inner()
+            .expect("lock not poisoned");
+        Ok((status.success(), stream_stderr))
     }
 
     /// Utility function: stream reader

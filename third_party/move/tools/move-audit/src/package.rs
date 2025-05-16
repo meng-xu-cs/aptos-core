@@ -1,3 +1,6 @@
+// Copyright (c) Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{
     common::{Account, LanguageSetting},
     deps::{PkgManifest, PkgNamedAddr},
@@ -99,13 +102,24 @@ pub fn exec_unit_test(
     named_accounts: &BTreeMap<String, Account>,
     language: LanguageSetting,
     filter: Option<&str>,
+    coverage: Option<&Path>,
 ) -> Result<()> {
+    // make sure the package builds normally
+    let built_pkg = build(pkg, &named_accounts, language, true)?;
+
     // collect assigned addresses
     let mut named_addresses = BTreeMap::new();
     collect_named_addresses(pkg, named_accounts, &mut named_addresses)?;
 
     // TODO: as a shortcut, currently we call the cli directly, call API instead
-    if !move_unit_test(&pkg.path, &named_addresses, language, filter)? {
+    if !move_unit_test(
+        &pkg.path,
+        &named_addresses,
+        language,
+        filter,
+        &built_pkg,
+        coverage,
+    )? {
         bail!("unit test failed on package {}", pkg.name);
     }
     Ok(())

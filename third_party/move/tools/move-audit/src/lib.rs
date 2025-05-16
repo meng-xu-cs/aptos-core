@@ -69,8 +69,11 @@ pub enum PkgCommand {
         config: Option<PathBuf>,
     },
     Doc,
-    Filter {
-        pattern: String,
+    Advanced {
+        #[clap(long)]
+        filter: Option<String>,
+        #[clap(long)]
+        coverage: Option<PathBuf>,
     },
 }
 
@@ -182,11 +185,17 @@ fn cmd_test(
         match command.as_ref() {
             None => {
                 log::info!("running unit tests for package {}", manifest.name);
-                package::exec_unit_test(manifest, &named_accounts, language, None)?;
+                package::exec_unit_test(manifest, &named_accounts, language, None, None)?;
             },
-            Some(PkgCommand::Filter { pattern }) => {
+            Some(PkgCommand::Advanced { filter, coverage }) => {
                 log::info!("running unit tests for package {}", manifest.name);
-                package::exec_unit_test(manifest, &named_accounts, language, Some(pattern))?;
+                package::exec_unit_test(
+                    manifest,
+                    &named_accounts,
+                    language,
+                    filter.as_deref(),
+                    coverage.as_deref(),
+                )?;
             },
             Some(PkgCommand::Compile) => {
                 log::info!("compiling package {}", manifest.name);
