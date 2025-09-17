@@ -84,6 +84,7 @@ pub mod aptos_debug_natives;
 mod bytecode;
 pub mod coverage;
 mod fmt;
+mod fuzz;
 mod lint;
 mod manifest;
 pub mod package_hooks;
@@ -137,6 +138,7 @@ pub enum MoveTool {
     View(ViewFunction),
     Replay(Replay),
     Fmt(Fmt),
+    Fuzz(fuzz::Fuzz),
     #[clap(subcommand)]
     Sim(Sim),
 }
@@ -176,6 +178,7 @@ impl MoveTool {
             MoveTool::View(tool) => tool.execute_serialized().await,
             MoveTool::Replay(tool) => tool.execute_serialized().await,
             MoveTool::Fmt(tool) => tool.execute_serialized().await,
+            MoveTool::Fuzz(tool) => tool.execute_serialized().await,
             MoveTool::Lint(tool) => tool.execute_serialized().await,
             MoveTool::Sim(tool) => tool.execute().await,
         }
