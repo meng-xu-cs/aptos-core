@@ -246,6 +246,7 @@ members = [
     "third_party/move/tools/move-decompiler",
     "third_party/move/tools/move-disassembler",
     "third_party/move/tools/move-docgen",
+    "third_party/move/tools/move-fuzz",
     "third_party/move/tools/move-linter",
     "third_party/move/tools/move-package",
     "third_party/move/tools/move-package-cache",
@@ -871,6 +872,7 @@ move-core-types = { path = "third_party/move/move-core/types" }
 move-decompiler = { path = "third_party/move/tools/move-decompiler" }
 move-docgen = { path = "third_party/move/tools/move-docgen" }
 move-disassembler = { path = "third_party/move/tools/move-disassembler" }
+move-fuzz = { path = "third_party/move/tools/move-fuzz" }
 move-ir-types = { path = "third_party/move/move-ir/types" }
 move-ir-compiler = { path = "third_party/move/move-ir-compiler" }
 move-ir-to-bytecode = { path = "third_party/move/move-ir-compiler/move-ir-to-bytecode" }
