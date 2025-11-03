@@ -5,7 +5,7 @@ use crate::{
     deps::PkgKind,
     prep::{
         ident::DatatypeIdent,
-        typing::{IntrinsicType, TypeBase, TypeItem, TypeRef, TypeTag, VectorVariant},
+        typing::{IntrinsicType, TypeBase, TypeItem, TypeRef, TypeTag},
     },
 };
 use move_binary_format::{
@@ -191,7 +191,6 @@ impl DatatypeRegistry {
                 };
                 TypeRef::Base(TypeTag::Vector {
                     element: element_tag.into(),
-                    variant: VectorVariant::Vector,
                 })
             },
             SignatureToken::Struct(idx) => {
@@ -202,11 +201,8 @@ impl DatatypeRegistry {
                 match IntrinsicType::try_parse_ident(&ident) {
                     Some(IntrinsicType::Bitvec) => TypeRef::Base(TypeTag::Bitvec),
                     Some(IntrinsicType::String) => TypeRef::Base(TypeTag::String),
-                    Some(IntrinsicType::Option)
-                    | Some(IntrinsicType::Vector(_))
-                    | Some(IntrinsicType::Map(_))
-                    | Some(IntrinsicType::Object) => {
-                        panic!("parameterized intrinsic type is not expected to be `SignatureToken::Struct`");
+                    Some(IntrinsicType::Object) => {
+                        panic!("Object<T> is cannot be `SignatureToken::Struct`");
                     },
                     None => {
                         // not an intrinsic type, locate the datatype
@@ -238,27 +234,6 @@ impl DatatypeRegistry {
                 match IntrinsicType::try_parse_ident(&ident) {
                     Some(IntrinsicType::Bitvec) | Some(IntrinsicType::String) => {
                         panic!("basic intrinsic type is not expected to be `SignatureToken::StructInstantiation`");
-                    },
-                    Some(IntrinsicType::Option) => {
-                        assert_eq!(ty_args.len(), 1);
-                        TypeRef::Base(TypeTag::Option {
-                            element: ty_args.pop().unwrap().into(),
-                        })
-                    },
-                    Some(IntrinsicType::Vector(variant)) => {
-                        assert_eq!(ty_args.len(), 1);
-                        TypeRef::Base(TypeTag::Vector {
-                            element: ty_args.pop().unwrap().into(),
-                            variant,
-                        })
-                    },
-                    Some(IntrinsicType::Map(variant)) => {
-                        assert_eq!(ty_args.len(), 2);
-                        TypeRef::Base(TypeTag::Map {
-                            key: ty_args.pop().unwrap().into(),
-                            value: ty_args.pop().unwrap().into(),
-                            variant,
-                        })
                     },
                     Some(IntrinsicType::Object) => {
                         assert_eq!(ty_args.len(), 1);
@@ -326,21 +301,8 @@ impl DatatypeRegistry {
             TypeTag::String => TypeBase::String,
             TypeTag::Address => TypeBase::Address,
             TypeTag::Signer => TypeBase::Signer,
-            TypeTag::Option { element } => TypeBase::Option {
+            TypeTag::Vector { element } => TypeBase::Vector {
                 element: self.instantiate_type_tag(element, ty_args).into(),
-            },
-            TypeTag::Vector { element, variant } => TypeBase::Vector {
-                element: self.instantiate_type_tag(element, ty_args).into(),
-                variant: *variant,
-            },
-            TypeTag::Map {
-                key,
-                value,
-                variant,
-            } => TypeBase::Map {
-                key: self.instantiate_type_tag(key, ty_args).into(),
-                value: self.instantiate_type_tag(value, ty_args).into(),
-                variant: *variant,
             },
             TypeTag::Datatype { ident, type_args } => {
                 let decl = self.lookup_decl(ident);

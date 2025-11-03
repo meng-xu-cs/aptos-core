@@ -3,7 +3,7 @@
 
 use crate::prep::{
     ident::{DatatypeIdent, FunctionIdent},
-    typing::{MapVariant, SimpleType, TypeBase, VectorVariant},
+    typing::{SimpleType, TypeBase},
 };
 use move_core_types::ability::AbilitySet;
 
@@ -70,18 +70,6 @@ pub enum DriverStatement {
     Arg2Bitvec {
         src: DriverVariable,
         depth: usize,
-        dst: usize,
-    },
-    Arg2SmartVec {
-        src: DriverVariable,
-        depth: usize,
-        dst: usize,
-    },
-    Arg2Map {
-        src_key: DriverVariable,
-        src_value: DriverVariable,
-        depth: usize,
-        variant: MapVariant,
         dst: usize,
     },
     Arg2ObjectKnown {
@@ -166,35 +154,7 @@ impl DriverCanvas {
             SimpleType::String => self.new_input(BasicInput::String, depth),
             SimpleType::Address => self.new_input(BasicInput::Address, depth),
             SimpleType::Signer => self.new_input(BasicInput::Signer, depth),
-            SimpleType::Option { element: _ } => todo!("optional argument is not supported yet"),
-            SimpleType::Vector { element, variant } => match variant {
-                VectorVariant::Vector => self.add_input_simple_recursive(element, depth + 1),
-                VectorVariant::BigVector => panic!("there is no way to construct a BigVector"),
-                VectorVariant::SmartVector => {
-                    let src = self.add_input_simple_recursive(element, depth + 1);
-                    let dst = self.new_local();
-                    self.statements
-                        .push(DriverStatement::Arg2SmartVec { src, depth, dst });
-                    DriverVariable::Local(dst)
-                },
-            },
-            SimpleType::Map {
-                key,
-                value,
-                variant,
-            } => {
-                let src_key = self.add_input_simple_recursive(key, depth + 1);
-                let src_value = self.add_input_simple_recursive(value, depth + 1);
-                let dst = self.new_local();
-                self.statements.push(DriverStatement::Arg2Map {
-                    src_key,
-                    src_value,
-                    depth,
-                    variant: *variant,
-                    dst,
-                });
-                DriverVariable::Local(dst)
-            },
+            SimpleType::Vector { element } => self.add_input_simple_recursive(element, depth + 1),
             SimpleType::ObjectKnown {
                 ident,
                 type_args,

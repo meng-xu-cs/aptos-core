@@ -5,7 +5,7 @@ use crate::prep::{
     function::FunctionDecl,
     ident::FunctionIdent,
     model::Model,
-    typing::{ComplexType, MapVariant, SimpleType, TypeBase, TypeItem, TypeMode, VectorVariant},
+    typing::{ComplexType, TypeBase, TypeItem, TypeMode},
 };
 use itertools::Itertools;
 use petgraph::{
@@ -73,36 +73,8 @@ enum FlowGraphNode {
 enum FlowGraphEdge {
     Use(usize),
     Def(usize),
-    OptionToElement,
-    ElementToOption,
-    VectorToElement {
-        variant: VectorVariant,
-    },
-    ElementToVector {
-        variant: VectorVariant,
-    },
-    MapToKey {
-        variant: MapVariant,
-    },
-    KeyToMapSimple {
-        value: SimpleType,
-        variant: MapVariant,
-    },
-    KeyToMapComplex {
-        value: NodeIndex,
-        variant: MapVariant,
-    },
-    MapToValue {
-        variant: MapVariant,
-    },
-    ValueToMapSimple {
-        key: SimpleType,
-        variant: MapVariant,
-    },
-    ValueToMapComplex {
-        key: NodeIndex,
-        variant: MapVariant,
-    },
+    VectorToElement,
+    ElementToVector,
     Copy,
     Deref,
     Freeze,
@@ -111,6 +83,12 @@ enum FlowGraphEdge {
 }
 
 /// A database that holds information we can statically get from the packages
+#[derive(Clone)]
+pub struct Analyzer<'a> {
+    model: &'a Model,
+}
+
+/// A database that holds information on how to construct datatypes via function calls
 #[derive(Clone)]
 pub struct FlowGraph<'a> {
     model: &'a Model,
@@ -277,109 +255,14 @@ impl<'a> FlowGraph<'a> {
                 match ty {
                     ComplexType::Datatype { .. } => (), // no explicit plan for datatype
                     ComplexType::Param { .. } => (),    // no explicit plan for type parameter
-                    ComplexType::Option { element } => {
+                    ComplexType::Vector { element } => {
                         let mut new_graph = self.clone();
                         let src_type = DatatypeItem::Base(element.as_ref().clone());
                         let src_node = new_graph.graph.add_node(FlowGraphNode::Datatype(src_type));
                         new_graph
                             .graph
-                            .add_edge(src_node, dt_node, FlowGraphEdge::ElementToOption);
+                            .add_edge(src_node, dt_node, FlowGraphEdge::ElementToVector);
                         plan.extend(new_graph.plan_for_datatype(trace, stack, src_node));
-                    },
-                    ComplexType::Vector { variant, element } => {
-                        let mut new_graph = self.clone();
-                        let src_type = DatatypeItem::Base(element.as_ref().clone());
-                        let src_node = new_graph.graph.add_node(FlowGraphNode::Datatype(src_type));
-                        new_graph.graph.add_edge(
-                            src_node,
-                            dt_node,
-                            FlowGraphEdge::ElementToVector { variant: *variant },
-                        );
-                        plan.extend(new_graph.plan_for_datatype(trace, stack, src_node));
-                    },
-                    ComplexType::MapOnKey {
-                        key,
-                        value,
-                        variant,
-                    } => {
-                        let mut new_graph = self.clone();
-                        let src_type = DatatypeItem::Base(key.as_ref().clone());
-                        let src_node = new_graph.graph.add_node(FlowGraphNode::Datatype(src_type));
-                        new_graph.graph.add_edge(
-                            src_node,
-                            dt_node,
-                            FlowGraphEdge::KeyToMapSimple {
-                                value: value.clone(),
-                                variant: *variant,
-                            },
-                        );
-                        plan.extend(new_graph.plan_for_datatype(trace, stack, src_node));
-                    },
-                    ComplexType::MapOnValue {
-                        key,
-                        value,
-                        variant,
-                    } => {
-                        let mut new_graph = self.clone();
-                        let src_type = DatatypeItem::Base(value.as_ref().clone());
-                        let src_node = new_graph.graph.add_node(FlowGraphNode::Datatype(src_type));
-                        new_graph.graph.add_edge(
-                            src_node,
-                            dt_node,
-                            FlowGraphEdge::ValueToMapSimple {
-                                key: key.clone(),
-                                variant: *variant,
-                            },
-                        );
-                        plan.extend(new_graph.plan_for_datatype(trace, stack, src_node));
-                    },
-                    ComplexType::MapOnBoth {
-                        key,
-                        value,
-                        variant,
-                    } => {
-                        let mut new_graph = self.clone();
-
-                        // nodes
-                        let key_src_type = DatatypeItem::Base(key.as_ref().clone());
-                        let key_src_node = new_graph
-                            .graph
-                            .add_node(FlowGraphNode::Datatype(key_src_type));
-
-                        let val_src_type = DatatypeItem::Base(value.as_ref().clone());
-                        let val_src_node = new_graph
-                            .graph
-                            .add_node(FlowGraphNode::Datatype(val_src_type));
-
-                        // edges
-                        new_graph.graph.add_edge(
-                            key_src_node,
-                            dt_node,
-                            FlowGraphEdge::KeyToMapComplex {
-                                value: val_src_node,
-                                variant: *variant,
-                            },
-                        );
-                        new_graph.graph.add_edge(
-                            val_src_node,
-                            dt_node,
-                            FlowGraphEdge::ValueToMapComplex {
-                                key: key_src_node,
-                                variant: *variant,
-                            },
-                        );
-
-                        // key side plans
-                        let partial_plans = new_graph.plan_for_datatype(trace, stack, key_src_node);
-
-                        // value side plans per each key side plan
-                        for partial_graph in partial_plans {
-                            plan.extend(partial_graph.plan_for_datatype(
-                                trace,
-                                stack,
-                                val_src_node,
-                            ));
-                        }
                     },
                 }
             },
