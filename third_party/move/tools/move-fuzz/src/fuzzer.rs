@@ -6,6 +6,7 @@ use crate::{
     deps::{PkgDefinition, PkgManifest},
     executor::{
         oneshot::{ExecStatus, OneshotFuzzer},
+        sequence::{self, ChainFuzzer, DefUseGraph, MAX_CHAIN_FUZZERS},
         tracing::TracingExecutor,
     },
     language::LanguageSetting,
@@ -23,6 +24,7 @@ use move_core_types::{
     language_storage::{StructTag, TypeTag as VmTypeTag},
 };
 use move_vm_runtime::tracing::{clear_tracing_buffer, enable_tracing};
+use rand::{rngs::StdRng, SeedableRng};
 use serde_json::json;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -45,6 +47,8 @@ pub fn entrypoint(
     dry_run: bool,
     dict_string: Vec<String>,
     path_fuzz_stats: PathBuf,
+    max_chain_length: usize,
+    max_chain_repetition: usize,
 ) -> Result<()> {
     // build a model on the packages
     let model = Model::new(&pkg_defs);
@@ -159,12 +163,79 @@ pub fn entrypoint(
     let num_scripts = oneshot_fuzzers.len();
     let seed_val = seed.unwrap_or(0);
 
+    //
+    // stage 2: discovery phase - profile resource reads/writes per script
+    //
+    info!(
+        "starting discovery phase ({} scripts)",
+        num_scripts
+    );
+    let profiles = sequence::discover_profiles(
+        &executor,
+        &entrypoints,
+        &type_pool,
+        &dict_string,
+        seed_val,
+        &cov_trace_path,
+    );
+
+    // build the Def-Use Graph from discovery profiles
+    let dug = DefUseGraph::from_profiles(&profiles);
+    info!(
+        "DUG: {} type nodes, {} scripts",
+        dug.num_types(),
+        dug.num_scripts()
+    );
+
+    // construct dependency chains via backward DUG traversal
+    let mut chain_rng = StdRng::seed_from_u64(seed_val);
+    let chains = sequence::construct_chains(
+        &dug,
+        max_chain_length,
+        max_chain_repetition,
+        MAX_CHAIN_FUZZERS,
+        &mut chain_rng,
+    );
+    info!("constructed {} chains", chains.len());
+
+    // create chain fuzzers
+    let mut chain_fuzzers: Vec<ChainFuzzer> = chains
+        .into_iter()
+        .map(|chain| {
+            let mut cf = ChainFuzzer::new(
+                executor.clone(),
+                seed_val,
+                chain,
+                &entrypoints,
+                type_pool.clone(),
+                cov_trace_path.clone(),
+                dict_string.clone(),
+            );
+            cf.absorb_shared_object_writes(&initial_resource_writes);
+            cf
+        })
+        .collect();
+    info!("created {} chain fuzzers", chain_fuzzers.len());
+
+    // clear trace data from discovery phase
+    clear_tracing_buffer();
+
     // startup banner
     eprintln!("=== Move Fuzzer ===");
-    eprintln!("scripts: {num_scripts} | seed: {seed_val} | max-depth: {max_trace_depth}");
+    eprintln!(
+        "scripts: {num_scripts} | chains: {} | seed: {seed_val} | max-depth: {max_trace_depth} | max-chain-len: {max_chain_length}",
+        chain_fuzzers.len()
+    );
     eprintln!("{}", "-".repeat(72));
     for (i, fuzzer) in oneshot_fuzzers.iter().enumerate() {
         eprintln!("  [{i:3}] {}", fuzzer.script_desc());
+    }
+    for (i, fuzzer) in chain_fuzzers.iter().enumerate() {
+        eprintln!(
+            "  [chain:{i:3}] {} (len={})",
+            fuzzer.script_short_desc(),
+            fuzzer.chain_len()
+        );
     }
     eprintln!("{}", "-".repeat(72));
     eprintln!("entering mutation loop...\n");
@@ -180,6 +251,8 @@ pub fn entrypoint(
 
     loop {
         let mut round_writes = vec![];
+
+        // run oneshot fuzzers
         for (idx, fuzzer) in oneshot_fuzzers.iter_mut().enumerate() {
             let (status, corpus_size, found_new, writes) = fuzzer.run_one()?;
             round_writes.extend(writes);
@@ -203,9 +276,33 @@ pub fn entrypoint(
             }
         }
 
+        // run chain fuzzers
+        for (idx, fuzzer) in chain_fuzzers.iter_mut().enumerate() {
+            let (status, corpus_size, found_new, writes) = fuzzer.run_one()?;
+            round_writes.extend(writes);
+            *category_counts.entry(status.category()).or_insert(0) += 1;
+            *stats.entry(status.to_string()).or_insert(0) += 1;
+            total_execs += 1;
+
+            if !matches!(status, ExecStatus::Success) && !seen_exec_stats.contains(&status) {
+                let desc = fuzzer.script_short_desc();
+                info!("[new-status] chain:{idx} {desc} | {status}");
+                seen_exec_stats.insert(status);
+            }
+
+            if found_new {
+                let desc = fuzzer.script_short_desc();
+                let cov = fuzzer.coverage_count();
+                info!("[+cov] chain:{idx} {desc} | corpus: {corpus_size} | coverage: {cov}");
+            }
+        }
+
         // broadcast new object discoveries to all fuzzers
         if !round_writes.is_empty() {
             for fuzzer in oneshot_fuzzers.iter_mut() {
+                fuzzer.absorb_shared_object_writes(&round_writes);
+            }
+            for fuzzer in chain_fuzzers.iter_mut() {
                 fuzzer.absorb_shared_object_writes(&round_writes);
             }
         }
@@ -219,9 +316,11 @@ pub fn entrypoint(
             let elapsed_str = fmt_elapsed(elapsed_secs);
             let execs_per_sec = total_execs as f64 / elapsed.as_secs_f64();
 
-            // total corpus and coverage
-            let total_corpus: usize = oneshot_fuzzers.iter().map(|f| f.corpus_size()).sum();
-            let total_coverage: usize = oneshot_fuzzers.iter().map(|f| f.coverage_count()).sum();
+            // total corpus and coverage (oneshot + chains)
+            let total_corpus: usize = oneshot_fuzzers.iter().map(|f| f.corpus_size()).sum::<usize>()
+                + chain_fuzzers.iter().map(|f| f.corpus_size()).sum::<usize>();
+            let total_coverage: usize = oneshot_fuzzers.iter().map(|f| f.coverage_count()).sum::<usize>()
+                + chain_fuzzers.iter().map(|f| f.coverage_count()).sum::<usize>();
             let coverage_delta = total_coverage.saturating_sub(last_report_coverage);
             let growth_rate = if elapsed_secs > 0 {
                 total_coverage as f64 / (elapsed_secs as f64 / 60.0)
@@ -265,6 +364,44 @@ pub fn entrypoint(
                 script_json.push(json!({
                     "index": i,
                     "name": desc,
+                    "exec_count": exec,
+                    "corpus_size": corp,
+                    "coverage_count": cov,
+                    "coverage_delta": delta,
+                    "last_new_coverage": last_str,
+                }));
+            }
+
+            // per-chain-fuzzer table
+            for (i, fuzzer) in chain_fuzzers.iter_mut().enumerate() {
+                let desc = fuzzer.script_short_desc();
+                let exec = fuzzer.exec_count();
+                let corp = fuzzer.corpus_size();
+                let cov = fuzzer.coverage_count();
+                let delta = fuzzer.coverage_delta_since_report();
+                let clen = fuzzer.chain_len();
+
+                let (hot_marker, last_str) = match fuzzer.last_new_coverage_time() {
+                    Some(t) if t.elapsed().as_secs() < 30 => ("*", fmt_ago(t)),
+                    Some(t) => (" ", fmt_ago(t)),
+                    None => (" ", "-".to_string()),
+                };
+
+                let delta_str = if delta > 0 {
+                    format!("+{delta:<6}")
+                } else {
+                    " ".repeat(7)
+                };
+
+                debug!(
+                    "  {hot_marker}[chain:{i:3}] (len={clen}) {desc:<36} exec:{exec:<8} corp:{corp:<5} \
+                     cov:{cov:<7} {delta_str} last:{last_str}"
+                );
+
+                script_json.push(json!({
+                    "index": format!("chain:{i}"),
+                    "name": desc,
+                    "chain_length": clen,
                     "exec_count": exec,
                     "corpus_size": corp,
                     "coverage_count": cov,

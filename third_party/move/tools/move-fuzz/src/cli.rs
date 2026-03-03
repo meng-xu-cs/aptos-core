@@ -102,6 +102,14 @@ pub enum FuzzCommand {
         /// Path to a string dictionary file (one string per line)
         #[clap(long)]
         string_dict: Option<PathBuf>,
+
+        /// Max length of dependency chains for multi-transaction fuzzing
+        #[clap(long, default_value = "5")]
+        max_chain_length: usize,
+
+        /// Max times a script can repeat within a single chain
+        #[clap(long, default_value = "2")]
+        max_chain_repetition: usize,
     },
 }
 
@@ -364,6 +372,8 @@ pub fn run_on(
             num_user_accounts,
             dry_run,
             string_dict,
+            max_chain_length,
+            max_chain_repetition,
         } => {
             cmd_auto(
                 &workdir,
@@ -375,6 +385,8 @@ pub fn run_on(
                 num_user_accounts,
                 dry_run,
                 string_dict,
+                max_chain_length,
+                max_chain_repetition,
             )?;
         },
     }
@@ -453,6 +465,8 @@ fn cmd_auto(
     num_user_accounts: usize,
     dry_run: bool,
     path_string_dict: Option<PathBuf>,
+    max_chain_length: usize,
+    max_chain_repetition: usize,
 ) -> Result<()> {
     // we need to see all packages unless the package is explicitly excluded
     if !pkg_filter.include_framework {
@@ -552,6 +566,8 @@ authors = []
         dry_run,
         dict_string,
         workdir.join("fuzz_stats.json"),
+        max_chain_length,
+        max_chain_repetition,
     )
 }
 

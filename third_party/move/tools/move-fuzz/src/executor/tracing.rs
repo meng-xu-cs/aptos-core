@@ -21,8 +21,9 @@ use aptos_types::{
     on_chain_config::{GasScheduleV2, OnChainConfig},
     state_store::{
         state_key::{inner::StateKeyInner, StateKey},
+        state_storage_usage::StateStorageUsage,
         state_value::StateValue,
-        TStateView,
+        StateViewId, StateViewResult, TStateView,
     },
     transaction::{
         AuxiliaryInfo, ExecutionStatus, TransactionOutput, TransactionPayload, TransactionStatus,
@@ -38,7 +39,10 @@ use aptos_vm_types::{
 use legacy_move_compiler::compiled_unit::CompiledUnit;
 use move_core_types::language_storage::StructTag;
 use move_package::compilation::compiled_package::CompiledUnitWithSource;
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+};
 
 /// Default APT fund per each new account (10M, with 8 decimals)
 const INITIAL_APT_BALANCE: u64 = 1_000_000_000_000_000;
@@ -73,6 +77,71 @@ pub struct ResourceWrite {
     pub address: AccountAddress,
     pub struct_tag: StructTag,
     pub is_resource_group: bool,
+}
+
+/// A resource read extracted from state view access
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResourceRead {
+    pub address: AccountAddress,
+    pub struct_tag: StructTag,
+    pub is_resource_group: bool,
+}
+
+/// A state view wrapper that records all state key accesses
+struct RecordingStateView<'a, S: ?Sized> {
+    inner: &'a S,
+    reads: RefCell<BTreeSet<StateKey>>,
+}
+
+impl<'a, S: TStateView<Key = StateKey> + ?Sized> RecordingStateView<'a, S> {
+    fn new(inner: &'a S) -> Self {
+        Self {
+            inner,
+            reads: RefCell::new(BTreeSet::new()),
+        }
+    }
+
+    /// Extract resource reads from the recorded state key accesses
+    fn extract_resource_reads(&self) -> Vec<ResourceRead> {
+        let mut result = Vec::new();
+        for key in self.reads.borrow().iter() {
+            let read = match key.inner() {
+                StateKeyInner::AccessPath(ap) => match ap.get_path() {
+                    Path::Resource(struct_tag) => ResourceRead {
+                        struct_tag,
+                        address: ap.address,
+                        is_resource_group: false,
+                    },
+                    Path::ResourceGroup(struct_tag) => ResourceRead {
+                        struct_tag,
+                        address: ap.address,
+                        is_resource_group: true,
+                    },
+                    Path::Code(..) => continue,
+                },
+                StateKeyInner::TableItem { .. } | StateKeyInner::Raw(..) => continue,
+            };
+            result.push(read);
+        }
+        result
+    }
+}
+
+impl<S: TStateView<Key = StateKey> + ?Sized> TStateView for RecordingStateView<'_, S> {
+    type Key = StateKey;
+
+    fn id(&self) -> StateViewId {
+        self.inner.id()
+    }
+
+    fn get_usage(&self) -> StateViewResult<StateStorageUsage> {
+        self.inner.get_usage()
+    }
+
+    fn get_state_value(&self, state_key: &StateKey) -> StateViewResult<Option<StateValue>> {
+        self.reads.borrow_mut().insert(state_key.clone());
+        self.inner.get_state_value(state_key)
+    }
 }
 
 /// A stateful executor
@@ -458,6 +527,104 @@ impl TracingExecutor {
             }
         }
         result
+    }
+
+    /// Execute a transaction without committing, tracking state reads
+    fn execute_transaction_tracking_reads(
+        &mut self,
+        sender: AccountAddress,
+        payload: TransactionPayload,
+    ) -> Result<(VMStatus, TransactionOutput, Vec<ResourceRead>)> {
+        let account = self
+            .address_registry
+            .lookup_account(sender)
+            .unwrap_or_else(|| {
+                panic!(
+                    "[invariant] unable to find the account \
+                     associated with the sender address {sender}"
+                )
+            });
+
+        let (gas_unit_price, max_gas_amount) = self.gas_profile.get_config_for_txn();
+        let signed_txn = account
+            .transaction()
+            .sequence_number(self.get_account_sequence_number(account))
+            .gas_unit_price(gas_unit_price)
+            .max_gas_amount(max_gas_amount)
+            .payload(payload)
+            .sign();
+
+        let state_view = self.executor.get_state_view();
+        let recording_view = RecordingStateView::new(state_view);
+        let env = AptosEnvironment::new(&recording_view);
+        let vm = AptosVM::new(&env);
+        let resolver = recording_view.as_move_resolver();
+        let code_storage = recording_view.as_aptos_code_storage(&env);
+        let log_context = AdapterLogSchema::new(recording_view.id(), 0);
+
+        let vm_result = vm.execute_user_transaction_with_custom_gas_meter(
+            &resolver,
+            &code_storage,
+            &signed_txn,
+            &log_context,
+            |gas_feature_version,
+             vm_gas_params,
+             _,
+             is_approved_gov_script,
+             meter_balance,
+             kill_switch| {
+                StandardGasMeter::new(StandardGasAlgebra::new(
+                    gas_feature_version,
+                    VMGasParameters {
+                        misc: MiscGasParameters::zeros(),
+                        instr: InstructionGasParameters::zeros(),
+                        txn: vm_gas_params.txn,
+                    },
+                    StorageGasParameters::unlimited(),
+                    is_approved_gov_script,
+                    meter_balance,
+                    kill_switch,
+                ))
+            },
+            &AuxiliaryInfo::default(),
+        );
+        let resource_reads = recording_view.extract_resource_reads();
+        match vm_result {
+            Ok((status, output, _gas_meter)) => {
+                match output.try_materialize_into_transaction_output(&resolver) {
+                    Ok(txn_output) => Ok((status, txn_output, resource_reads)),
+                    Err(error_status) => {
+                        bail!("AptosVM failed unexpectedly with status: {error_status}")
+                    },
+                }
+            },
+            Err(error_status) => {
+                bail!("AptosVM failed unexpectedly with status: {error_status}");
+            },
+        }
+    }
+
+    /// Run a transaction with a sender, tracking resource reads and writes
+    pub fn run_payload_with_sender_tracking(
+        &mut self,
+        sender: AccountAddress,
+        payload: TransactionPayload,
+    ) -> Result<(VMStatus, TransactionStatus, Vec<ResourceWrite>, Vec<ResourceRead>)> {
+        let (vm_status, output, resource_reads) =
+            self.execute_transaction_tracking_reads(sender, payload)?;
+        let resource_writes = Self::extract_resource_writes(&output);
+        let (write_set, events, _gas_used, txn_status, _txn_misc) = output.unpack();
+        match txn_status {
+            TransactionStatus::Keep(_) => {
+                self.executor.apply_write_set(&write_set);
+                self.executor.append_events(events);
+            },
+            TransactionStatus::Discard(_) => {},
+            TransactionStatus::Retry => {
+                bail!("unexpected retry status for transaction execution");
+            },
+        }
+        Ok((vm_status, txn_status, resource_writes, resource_reads))
     }
 
     /// Run a transaction with a sender
