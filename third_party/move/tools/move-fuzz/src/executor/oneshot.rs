@@ -3,7 +3,7 @@
 
 use crate::{
     executor::{
-        sequence::ExecResourceProfile,
+        sequence::{ExecResourceProfile, SeedInput},
         tracing::{ResourceWrite, TracingExecutor},
     },
     mutate::mutator::{Mutator, TypePool},
@@ -20,6 +20,7 @@ use move_core_types::{
 };
 use move_coverage::coverage_map::{CoverageMap, ExecCoverageMap, ModuleCoverageMap};
 use move_vm_runtime::tracing::{clear_tracing_buffer, flush_tracing_buffer};
+use rand::Rng;
 use std::{fmt::Display, path::PathBuf, time::Instant};
 
 /// Status of one execution
@@ -212,7 +213,7 @@ pub struct OneshotFuzzer {
     mutator: Mutator,
     trace_path: PathBuf,
     coverage: ExecCoverageMap,
-    seedpool: Vec<(Vec<VmTypeTag>, Vec<MoveValue>)>,
+    seedpool: Vec<SeedInput>,
 
     // statistics counting
     exec_count: u64,
@@ -263,6 +264,18 @@ impl OneshotFuzzer {
         self.seedpool.len()
     }
 
+    /// Sample one seed from the local corpus.
+    pub fn sample_seed<R: Rng + ?Sized>(
+        &self,
+        rng: &mut R,
+    ) -> Option<SeedInput> {
+        if self.seedpool.is_empty() {
+            return None;
+        }
+        let index = rng.gen_range(0, self.seedpool.len());
+        Some(self.seedpool[index].clone())
+    }
+
     /// Get the total number of covered bytecode positions across all modules
     pub fn coverage_count(&self) -> usize {
         self.coverage
@@ -301,14 +314,30 @@ impl OneshotFuzzer {
     }
 
     /// Execute one entry-point.
-    /// Returns (status, corpus_size, found_new_coverage, resource_writes, profile).
+    /// Returns (status, corpus_size, found_new_coverage, resource_writes, profile, seed).
     /// Resource writes are only returned for successful transactions.
-    /// The profile is `Some` only when new coverage was found (a seed was added).
+    /// The profile and executed seed are always returned.
     pub fn run_one(
         &mut self,
-    ) -> Result<(ExecStatus, usize, bool, Vec<ResourceWrite>, Option<ExecResourceProfile>)> {
-        // prepare
-        let sender = self.mutator.random_signer();
+    ) -> Result<(
+        ExecStatus,
+        usize,
+        bool,
+        Vec<ResourceWrite>,
+        ExecResourceProfile,
+        SeedInput,
+    )> {
+        let seed_choice = self.mutator.should_mutate(self.seedpool.len());
+        let sender = match seed_choice {
+            None => self.mutator.random_signer(),
+            Some(index) => {
+                if self.mutator.random_percent() < 70 {
+                    self.seedpool[index].sender
+                } else {
+                    self.mutator.random_signer()
+                }
+            },
+        };
 
         // the VM automatically injects the signer from the transaction sender,
         // so we only generate/mutate non-signer parameters as script arguments
@@ -320,8 +349,7 @@ impl OneshotFuzzer {
             .collect();
 
         // generate or mutate type arguments and value arguments
-        let (ty_args, args): (Vec<VmTypeTag>, Vec<MoveValue>) =
-            match self.mutator.should_mutate(self.seedpool.len()) {
+        let (ty_args, args): (Vec<VmTypeTag>, Vec<MoveValue>) = match seed_choice {
                 None => {
                     // generate new type arguments and value arguments
                     let ty_args = self.mutator.random_type_args(&self.script_sig.generics);
@@ -333,7 +361,9 @@ impl OneshotFuzzer {
                 },
                 Some(index) => {
                     // mutate existing seed
-                    let (seed_ty_args, seed_args) = &self.seedpool[index];
+                    let seed = &self.seedpool[index];
+                    let seed_ty_args = &seed.ty_args;
+                    let seed_args = &seed.args;
                     assert_eq!(non_signer_params.len(), seed_args.len());
 
                     let ty_args = if !self.script_sig.generics.is_empty()
@@ -370,9 +400,9 @@ impl OneshotFuzzer {
         clear_tracing_buffer();
 
         // execute with tracking to capture resource reads
-        let (vm_status, txn_status, resource_writes, resource_reads) =
-            self.executor
-                .run_payload_with_sender_tracking(sender, payload)?;
+        let (vm_status, txn_status, resource_writes, resource_reads) = self
+            .executor
+            .run_payload_with_sender_tracking(sender, payload)?;
 
         // update object dictionary from write set
         self.mutator.update_object_dict(&resource_writes);
@@ -385,18 +415,20 @@ impl OneshotFuzzer {
         let exec_status: ExecStatus = (vm_status, txn_status).into();
         let coverage_map = CoverageMap::from_trace_file(&self.trace_path)?;
         let found_new = self.update_coverage(coverage_map);
-        let profile = if found_new {
+        if found_new {
             self.last_new_coverage_time = Some(Instant::now());
-            self.seedpool.push((ty_args, args));
-            Some(ExecResourceProfile::from_execution(
-                self.script_index,
-                &resource_writes,
-                &resource_reads,
-                matches!(exec_status, ExecStatus::Success),
-            ))
-        } else {
-            None
-        };
+            self.seedpool.push(SeedInput {
+                sender,
+                ty_args: ty_args.clone(),
+                args: args.clone(),
+            });
+        }
+        let profile = ExecResourceProfile::from_execution(
+            self.script_index,
+            &resource_writes,
+            &resource_reads,
+            matches!(exec_status, ExecStatus::Success),
+        );
 
         // only share resource writes from successful transactions
         let shared_writes = if matches!(exec_status, ExecStatus::Success) {
@@ -412,6 +444,11 @@ impl OneshotFuzzer {
             found_new,
             shared_writes,
             profile,
+            SeedInput {
+                sender,
+                ty_args,
+                args,
+            },
         ))
     }
 

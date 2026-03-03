@@ -37,11 +37,12 @@ use aptos_vm_types::{
     module_and_script_storage::AsAptosCodeStorage, storage::StorageGasParameters,
 };
 use legacy_move_compiler::compiled_unit::CompiledUnit;
-use move_core_types::language_storage::StructTag;
+use move_core_types::{identifier::Identifier, language_storage::StructTag};
 use move_package::compilation::compiled_package::CompiledUnitWithSource;
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
+    hash::{Hash, Hasher},
 };
 
 /// Default APT fund per each new account (10M, with 8 decimals)
@@ -87,6 +88,21 @@ pub struct ResourceRead {
     pub is_resource_group: bool,
 }
 
+/// Convert non-resource state keys (table item / raw) into synthetic StructTags
+/// so they can still participate in def-use tracking.
+fn synthetic_struct_tag(prefix: &str, state_key: &StateKey) -> StructTag {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    format!("{state_key:?}").hash(&mut hasher);
+    let suffix = hasher.finish();
+    StructTag {
+        address: AccountAddress::ONE,
+        module: Identifier::new("global_state").expect("valid synthetic module identifier"),
+        name: Identifier::new(format!("{prefix}{suffix:016x}"))
+            .expect("valid synthetic struct identifier"),
+        type_args: vec![],
+    }
+}
+
 /// A state view wrapper that records all state key accesses
 struct RecordingStateView<'a, S: ?Sized> {
     inner: &'a S,
@@ -119,7 +135,16 @@ impl<'a, S: TStateView<Key = StateKey> + ?Sized> RecordingStateView<'a, S> {
                     },
                     Path::Code(..) => continue,
                 },
-                StateKeyInner::TableItem { .. } | StateKeyInner::Raw(..) => continue,
+                StateKeyInner::TableItem { .. } => ResourceRead {
+                    struct_tag: synthetic_struct_tag("table_", key),
+                    address: AccountAddress::ONE,
+                    is_resource_group: false,
+                },
+                StateKeyInner::Raw(..) => ResourceRead {
+                    struct_tag: synthetic_struct_tag("raw_", key),
+                    address: AccountAddress::ONE,
+                    is_resource_group: false,
+                },
             };
             result.push(read);
         }
@@ -295,7 +320,7 @@ impl TracingExecutor {
     /// Extract resource writes from a write set.
     ///
     /// Returns tuples of `(struct_tag, address, is_resource_group)` for each
-    /// non-deletion resource or resource group write.
+    /// non-deletion resource/resource-group/table-item/raw write.
     fn extract_resource_writes(output: &TransactionOutput) -> Vec<ResourceWrite> {
         let mut result = Vec::new();
         for (state_key, _) in output.write_set().write_op_iter() {
@@ -316,9 +341,15 @@ impl TracingExecutor {
                         continue;
                     },
                 },
-                StateKeyInner::TableItem { .. } | StateKeyInner::Raw(..) => {
-                    // we only care about resource writes, so skip table item and raw bytes
-                    continue;
+                StateKeyInner::TableItem { .. } => ResourceWrite {
+                    struct_tag: synthetic_struct_tag("table_", state_key),
+                    address: AccountAddress::ONE,
+                    is_resource_group: true,
+                },
+                StateKeyInner::Raw(..) => ResourceWrite {
+                    struct_tag: synthetic_struct_tag("raw_", state_key),
+                    address: AccountAddress::ONE,
+                    is_resource_group: true,
                 },
             };
             result.push(write);
@@ -495,7 +526,7 @@ impl TracingExecutor {
 
     /// Extract all resource writes from the full state store.
     ///
-    /// Returns every resource and resource-group entry as a `ResourceWrite`.
+    /// Returns every resource/resource-group/table-item/raw entry as a `ResourceWrite`.
     /// The caller (e.g. `Mutator::update_object_dict`) is responsible for
     /// the two-pass ObjectGroup filtering to identify which addresses are
     /// objects and which resources belong to them.
@@ -506,8 +537,8 @@ impl TracingExecutor {
             if value_opt.is_none() {
                 continue;
             }
-            if let StateKeyInner::AccessPath(ap) = state_key.inner() {
-                match ap.get_path() {
+            match state_key.inner() {
+                StateKeyInner::AccessPath(ap) => match ap.get_path() {
                     Path::Resource(struct_tag) => {
                         result.push(ResourceWrite {
                             address: ap.address,
@@ -523,7 +554,21 @@ impl TracingExecutor {
                         });
                     },
                     Path::Code(..) => {},
-                }
+                },
+                StateKeyInner::TableItem { .. } => {
+                    result.push(ResourceWrite {
+                        address: AccountAddress::ONE,
+                        struct_tag: synthetic_struct_tag("table_", state_key),
+                        is_resource_group: true,
+                    });
+                },
+                StateKeyInner::Raw(..) => {
+                    result.push(ResourceWrite {
+                        address: AccountAddress::ONE,
+                        struct_tag: synthetic_struct_tag("raw_", state_key),
+                        is_resource_group: true,
+                    });
+                },
             }
         }
         result
@@ -609,7 +654,12 @@ impl TracingExecutor {
         &mut self,
         sender: AccountAddress,
         payload: TransactionPayload,
-    ) -> Result<(VMStatus, TransactionStatus, Vec<ResourceWrite>, Vec<ResourceRead>)> {
+    ) -> Result<(
+        VMStatus,
+        TransactionStatus,
+        Vec<ResourceWrite>,
+        Vec<ResourceRead>,
+    )> {
         let (vm_status, output, resource_reads) =
             self.execute_transaction_tracking_reads(sender, payload)?;
         let resource_writes = Self::extract_resource_writes(&output);
