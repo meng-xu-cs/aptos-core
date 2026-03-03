@@ -110,6 +110,10 @@ pub enum FuzzCommand {
         /// Max times a script can repeat within a single chain
         #[clap(long, default_value = "2")]
         max_chain_repetition: usize,
+
+        /// Seconds without new coverage before transitioning from Phase 1 to Phase 2
+        #[clap(long, default_value = "120")]
+        saturation_secs: u64,
     },
 }
 
@@ -374,6 +378,7 @@ pub fn run_on(
             string_dict,
             max_chain_length,
             max_chain_repetition,
+            saturation_secs,
         } => {
             cmd_auto(
                 &workdir,
@@ -387,6 +392,7 @@ pub fn run_on(
                 string_dict,
                 max_chain_length,
                 max_chain_repetition,
+                saturation_secs,
             )?;
         },
     }
@@ -467,6 +473,7 @@ fn cmd_auto(
     path_string_dict: Option<PathBuf>,
     max_chain_length: usize,
     max_chain_repetition: usize,
+    saturation_secs: u64,
 ) -> Result<()> {
     // we need to see all packages unless the package is explicitly excluded
     if !pkg_filter.include_framework {
@@ -568,6 +575,7 @@ authors = []
         workdir.join("fuzz_stats.json"),
         max_chain_length,
         max_chain_repetition,
+        saturation_secs,
     )
 }
 

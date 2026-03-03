@@ -55,6 +55,7 @@ pub struct ScriptProfile {
 
 /// Resource profile from a single execution that found new coverage.
 /// Used to feed per-seed observations back into the DUG.
+#[derive(Clone)]
 pub struct ExecResourceProfile {
     pub script_index: usize,
     pub reads: BTreeSet<ResourceTag>,
