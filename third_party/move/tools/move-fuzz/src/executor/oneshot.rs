@@ -21,7 +21,7 @@ use move_core_types::{
 use move_coverage::coverage_map::{CoverageMap, ExecCoverageMap, ModuleCoverageMap};
 use move_vm_runtime::tracing::{clear_tracing_buffer, flush_tracing_buffer};
 use rand::Rng;
-use std::{fmt::Display, path::PathBuf, time::Instant};
+use std::{collections::BTreeSet, fmt::Display, path::PathBuf, time::Instant};
 
 /// Status of one execution
 #[derive(Clone, Ord, PartialOrd, Eq, PartialEq)]
@@ -276,6 +276,13 @@ impl OneshotFuzzer {
         Some(self.seedpool[index].clone())
     }
 
+    /// Remember a concrete seed in the local corpus if not already present.
+    pub fn remember_seed(&mut self, seed: SeedInput) {
+        if !self.seedpool.contains(&seed) {
+            self.seedpool.push(seed);
+        }
+    }
+
     /// Get the total number of covered bytecode positions across all modules
     pub fn coverage_count(&self) -> usize {
         self.coverage
@@ -284,6 +291,19 @@ impl OneshotFuzzer {
             .flat_map(|m| m.function_maps.values())
             .map(|f| f.len())
             .sum()
+    }
+
+    /// Globalized coverage keys for cross-fuzzer deduplication.
+    pub fn coverage_keys(&self) -> BTreeSet<String> {
+        let mut keys = BTreeSet::new();
+        for (module, module_map) in &self.coverage.module_maps {
+            for (function, entries) in &module_map.function_maps {
+                for entry in entries {
+                    keys.insert(format!("{module:?}:{function}:{entry:?}"));
+                }
+            }
+        }
+        keys
     }
 
     /// Get the total number of executions
@@ -417,7 +437,7 @@ impl OneshotFuzzer {
         let found_new = self.update_coverage(coverage_map);
         if found_new {
             self.last_new_coverage_time = Some(Instant::now());
-            self.seedpool.push(SeedInput {
+            self.remember_seed(SeedInput {
                 sender,
                 ty_args: ty_args.clone(),
                 args: args.clone(),

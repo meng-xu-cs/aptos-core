@@ -656,6 +656,26 @@ script {{
             parameters: script_params,
         }
     }
+
+    /// Stable signature key used to deduplicate generated wrappers.
+    pub fn dedup_key(&self, ident: &FunctionIdent) -> String {
+        let generics_key = self
+            .generics
+            .iter()
+            .map(|g| format!("{g:?}"))
+            .join("|");
+        let params_key = self
+            .parameters
+            .iter()
+            .map(|p| p.to_string())
+            .join("|");
+        let statements_key = self
+            .statements
+            .iter()
+            .map(|s| s.to_string())
+            .join("|");
+        format!("{ident}||{generics_key}||{params_key}||{statements_key}")
+    }
 }
 
 /// Generate Move code to bridge a `vector<...vector<bool>...>` to a (nested vector of) `BitVector`.

@@ -100,7 +100,7 @@ macro_rules! create_int {
         let x = $s.rng.gen_range(0, GEN_INT_PROB_TOTAL);
         if x < GEN_INT_PROB_MIN {
             <$t>::MIN
-        } else if x >= GEN_INT_PROB_MAX {
+        } else if x < GEN_INT_PROB_MIN + GEN_INT_PROB_MAX {
             <$t>::MAX
         } else {
             $s.rng.r#gen()
@@ -110,7 +110,7 @@ macro_rules! create_int {
         let x = $s.rng.gen_range(0, GEN_INT_PROB_TOTAL);
         if x < GEN_INT_PROB_MIN {
             $min
-        } else if x >= GEN_INT_PROB_MAX {
+        } else if x < GEN_INT_PROB_MIN + GEN_INT_PROB_MAX {
             $max
         } else {
             $rand
@@ -472,9 +472,13 @@ impl Mutator {
             let x = self.rng.gen_range(0, GEN_ADDR_PROB_TOTAL);
             let kind = if x < GEN_ADDR_PROB_NAME_PRIMARY {
                 AddressKind::Named(NamedAddressKind::Primary)
-            } else if x < GEN_ADDR_PROB_NAME_DEPENDENCY {
+            } else if x < GEN_ADDR_PROB_NAME_PRIMARY + GEN_ADDR_PROB_NAME_DEPENDENCY {
                 AddressKind::Named(NamedAddressKind::Dependency)
-            } else if x < GEN_ADDR_PROB_NAME_FRAMEWORK {
+            } else if x
+                < GEN_ADDR_PROB_NAME_PRIMARY
+                    + GEN_ADDR_PROB_NAME_DEPENDENCY
+                    + GEN_ADDR_PROB_NAME_FRAMEWORK
+            {
                 AddressKind::Named(NamedAddressKind::Framework)
             } else {
                 AddressKind::User
@@ -572,4 +576,86 @@ impl Mutator {
 #[inline]
 fn str_to_move_bytes(s: &str) -> MoveValue {
     MoveValue::Vector(s.bytes().map(MoveValue::U8).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::prep::canvas::BasicInput;
+
+    fn test_mutator_with_address_buckets(seed: u64) -> Mutator {
+        let mut dict_address: BTreeMap<AddressKind, BTreeSet<AccountAddress>> = BTreeMap::new();
+        dict_address.insert(
+            AddressKind::Named(NamedAddressKind::Primary),
+            BTreeSet::from([AccountAddress::from_hex_literal("0x11").unwrap()]),
+        );
+        dict_address.insert(
+            AddressKind::Named(NamedAddressKind::Dependency),
+            BTreeSet::from([AccountAddress::from_hex_literal("0x22").unwrap()]),
+        );
+        dict_address.insert(
+            AddressKind::Named(NamedAddressKind::Framework),
+            BTreeSet::from([AccountAddress::from_hex_literal("0x33").unwrap()]),
+        );
+        dict_address.insert(
+            AddressKind::User,
+            BTreeSet::from([AccountAddress::from_hex_literal("0x44").unwrap()]),
+        );
+        Mutator::new(seed, dict_address, TypePool::new(), vec![])
+    }
+
+    #[test]
+    fn test_random_int_generation_reaches_non_extreme_values() {
+        let mut mutator = test_mutator_with_address_buckets(7);
+        let mut saw_min = false;
+        let mut saw_max = false;
+        let mut saw_mid = false;
+
+        for _ in 0..2000 {
+            let v = match mutator.random_value(&BasicInput::U64) {
+                MoveValue::U64(v) => v,
+                _ => unreachable!("expected u64"),
+            };
+            saw_min |= v == u64::MIN;
+            saw_max |= v == u64::MAX;
+            saw_mid |= v != u64::MIN && v != u64::MAX;
+            if saw_min && saw_max && saw_mid {
+                break;
+            }
+        }
+
+        assert!(saw_min, "u64::MIN branch was not sampled");
+        assert!(saw_max, "u64::MAX branch was not sampled");
+        assert!(saw_mid, "random mid-value branch was not sampled");
+    }
+
+    #[test]
+    fn test_random_address_samples_all_kinds() {
+        let mut mutator = test_mutator_with_address_buckets(42);
+        let primary = AccountAddress::from_hex_literal("0x11").unwrap();
+        let dependency = AccountAddress::from_hex_literal("0x22").unwrap();
+        let framework = AccountAddress::from_hex_literal("0x33").unwrap();
+        let user = AccountAddress::from_hex_literal("0x44").unwrap();
+
+        let mut seen_primary = false;
+        let mut seen_dependency = false;
+        let mut seen_framework = false;
+        let mut seen_user = false;
+
+        for _ in 0..2000 {
+            let addr = mutator.random_signer();
+            seen_primary |= addr == primary;
+            seen_dependency |= addr == dependency;
+            seen_framework |= addr == framework;
+            seen_user |= addr == user;
+            if seen_primary && seen_dependency && seen_framework && seen_user {
+                break;
+            }
+        }
+
+        assert!(seen_primary, "primary address bucket was never sampled");
+        assert!(seen_dependency, "dependency address bucket was never sampled");
+        assert!(seen_framework, "framework address bucket was never sampled");
+        assert!(seen_user, "user address bucket was never sampled");
+    }
 }

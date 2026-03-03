@@ -27,11 +27,15 @@ use move_vm_runtime::tracing::{clear_tracing_buffer, enable_tracing};
 use rand::{rngs::StdRng, SeedableRng};
 use serde_json::json;
 use std::{
+    cmp::Reverse,
     collections::{BTreeMap, BTreeSet},
     fs,
     path::PathBuf,
     time::Instant,
 };
+
+const CHAIN_REBUILD_INTERVAL_SECS: u64 = 60;
+const SEQUENCE_MUTATION_INTERVAL_SECS: u64 = 30;
 
 /// Entrypoint for the fuzzer
 pub fn entrypoint(
@@ -144,12 +148,13 @@ pub fn entrypoint(
     // stage 1: per-script fuzzing
     //
 
+    let seed_val = seed.unwrap_or(0);
     let mut oneshot_fuzzers = vec![];
     // prepare one fuzzer for each script
     for (idx, (sig, code)) in entrypoints.iter().enumerate() {
         let mut instance = OneshotFuzzer::new(
             executor.clone(),
-            seed.unwrap_or(0),
+            derive_seed(seed_val, idx as u64),
             idx,
             sig.clone(),
             code.clone(),
@@ -163,7 +168,6 @@ pub fn entrypoint(
     }
 
     let num_scripts = oneshot_fuzzers.len();
-    let seed_val = seed.unwrap_or(0);
 
     //
     // Phase state: DUG and chains are built lazily at Phase 2 transition
@@ -175,9 +179,12 @@ pub fn entrypoint(
     let mut dug: Option<DefUseGraph> = None;
     let mut chain_fuzzers: Vec<ChainFuzzer> = vec![];
     let mut seq_db = SequenceDb::new();
-    let mut chain_rng = StdRng::seed_from_u64(seed_val);
+    let mut chain_rng = StdRng::seed_from_u64(derive_seed(seed_val, 0x9E3779B97F4A7C15));
+    let mut chain_seed_nonce = 0u64;
     let mut dug_last_marker = 0usize;
     let mut last_chain_reconstruction = Instant::now();
+    let mut last_sequence_mutation = Instant::now();
+    let mut last_phase2_novelty = Instant::now();
 
     // startup banner
     eprintln!("=== Move Fuzzer (Phase 1: Bootstrap) ===");
@@ -203,9 +210,28 @@ pub fn entrypoint(
     loop {
         let mut round_writes = vec![];
 
-        // run oneshot fuzzers
-        for (idx, fuzzer) in oneshot_fuzzers.iter_mut().enumerate() {
+        // energy-based scheduling: prioritize recently-productive fuzzers while
+        // still periodically giving full rounds to avoid starvation.
+        let run_all_oneshots = !phase2_entered || iteration % 20 == 0;
+        let mut oneshot_order: Vec<usize> = (0..oneshot_fuzzers.len()).collect();
+        oneshot_order.sort_by_key(|&i| {
+            (
+                oneshot_fuzzers[i]
+                    .last_new_coverage_time()
+                    .map_or(u64::MAX, |t| t.elapsed().as_secs()),
+                Reverse(oneshot_fuzzers[i].corpus_size()),
+            )
+        });
+        let oneshot_budget = if run_all_oneshots {
+            oneshot_order.len()
+        } else {
+            ((oneshot_order.len() * 70) / 100).max(1)
+        };
+
+        for idx in oneshot_order.into_iter().take(oneshot_budget) {
+            let fuzzer = &mut oneshot_fuzzers[idx];
             let (status, corpus_size, found_new, writes, profile, seed) = fuzzer.run_one()?;
+            let has_successful_writes = !writes.is_empty();
             round_writes.extend(writes);
             // update statistics
             *category_counts.entry(status.category()).or_insert(0) += 1;
@@ -224,6 +250,11 @@ pub fn entrypoint(
                 bootstrap_dug.add_seed_observation(&profile, seed.clone()).0
             };
 
+            // Keep state-progressing seeds even when they don't extend coverage.
+            if dug_changed || has_successful_writes {
+                fuzzer.remember_seed(seed.clone());
+            }
+
             // log new error codes as they are discovered
             if !matches!(status, ExecStatus::Success) && !seen_exec_stats.contains(&status) {
                 let desc = fuzzer.script_short_desc();
@@ -238,6 +269,9 @@ pub fn entrypoint(
                 let cov = fuzzer.coverage_count();
                 info!("[+cov] #{idx} {desc} | corpus: {corpus_size} | coverage: {cov}");
             }
+            if phase2_entered && (found_new || dug_changed) {
+                last_phase2_novelty = Instant::now();
+            }
 
             // Save single-step seeds if they improved coverage OR uncovered new DUG edges.
             if found_new || dug_changed {
@@ -247,7 +281,24 @@ pub fn entrypoint(
 
         // run chain fuzzers (Phase 2 only)
         if phase2_entered {
-            for (idx, fuzzer) in chain_fuzzers.iter_mut().enumerate() {
+            let run_all_chains = iteration % 10 == 0;
+            let mut chain_order: Vec<usize> = (0..chain_fuzzers.len()).collect();
+            chain_order.sort_by_key(|&i| {
+                (
+                    chain_fuzzers[i]
+                        .last_new_coverage_time()
+                        .map_or(u64::MAX, |t| t.elapsed().as_secs()),
+                    Reverse(chain_fuzzers[i].corpus_size()),
+                )
+            });
+            let chain_budget = if run_all_chains {
+                chain_order.len()
+            } else {
+                ((chain_order.len() * 60) / 100).max(1)
+            };
+
+            for idx in chain_order.into_iter().take(chain_budget) {
+                let fuzzer = &mut chain_fuzzers[idx];
                 let (status, corpus_size, found_new, writes, profiles, seed) =
                     fuzzer.run_one(Some(&seq_db))?;
                 round_writes.extend(writes);
@@ -281,6 +332,9 @@ pub fn entrypoint(
                     let cov = fuzzer.coverage_count();
                     info!("[+cov] chain:{idx} {desc} | corpus: {corpus_size} | coverage: {cov}");
                 }
+                if found_new || dug_changed {
+                    last_phase2_novelty = Instant::now();
+                }
             }
         }
 
@@ -309,14 +363,14 @@ pub fn entrypoint(
                 .map(|f| f.corpus_size())
                 .sum::<usize>()
                 + chain_fuzzers.iter().map(|f| f.corpus_size()).sum::<usize>();
-            let total_coverage: usize = oneshot_fuzzers
-                .iter()
-                .map(|f| f.coverage_count())
-                .sum::<usize>()
-                + chain_fuzzers
-                    .iter()
-                    .map(|f| f.coverage_count())
-                    .sum::<usize>();
+            let mut global_coverage = BTreeSet::new();
+            for f in &oneshot_fuzzers {
+                global_coverage.extend(f.coverage_keys());
+            }
+            for f in &chain_fuzzers {
+                global_coverage.extend(f.coverage_keys());
+            }
+            let total_coverage = global_coverage.len();
             let coverage_delta = total_coverage.saturating_sub(last_report_coverage);
             let growth_rate = if elapsed_secs > 0 {
                 total_coverage as f64 / (elapsed_secs as f64 / 60.0)
@@ -484,13 +538,14 @@ pub fn entrypoint(
                     let chain_steps = chain.steps.clone();
                     let mut cf = ChainFuzzer::new(
                         executor.clone(),
-                        seed_val,
+                        derive_seed(seed_val, chain_seed_nonce),
                         chain,
                         &entrypoints,
                         type_pool.clone(),
                         cov_trace_path.clone(),
                         dict_string.clone(),
                     );
+                    chain_seed_nonce = chain_seed_nonce.wrapping_add(1);
                     cf.absorb_shared_object_writes(&initial_resource_writes);
                     let mut bootstrap_seed = seed_inputs;
                     if bootstrap_seed.is_empty() {
@@ -516,6 +571,8 @@ pub fn entrypoint(
                 dug_last_marker = built_dug.modification_marker();
                 dug = Some(built_dug);
                 last_chain_reconstruction = Instant::now();
+                last_sequence_mutation = Instant::now();
+                last_phase2_novelty = Instant::now();
                 phase2_entered = true;
 
                 // Log chain fuzzers
@@ -534,10 +591,12 @@ pub fn entrypoint(
                 info!("Phase 2 entered with {} chain fuzzers", chain_fuzzers.len());
             }
 
-            // Dynamic chain reconstruction (Phase 2 only, every 60 seconds if DUG changed)
+            // Phase 2 scheduling:
+            // 1) DUG-driven chain reconstruction (on DUG change)
+            // 2) sequence mutation/extension (periodic, independent of DUG-change gate)
             if phase2_entered {
                 let d = dug.as_mut().unwrap();
-                if last_chain_reconstruction.elapsed().as_secs() >= 60
+                if last_chain_reconstruction.elapsed().as_secs() >= CHAIN_REBUILD_INTERVAL_SECS
                     && d.has_changed_since(dug_last_marker)
                 {
                     dug_last_marker = d.modification_marker();
@@ -581,13 +640,14 @@ pub fn entrypoint(
                         let chain_steps = chain.steps.clone();
                         let mut cf = ChainFuzzer::new(
                             executor.clone(),
-                            seed_val,
+                            derive_seed(seed_val, chain_seed_nonce),
                             chain,
                             &entrypoints,
                             type_pool.clone(),
                             cov_trace_path.clone(),
                             dict_string.clone(),
                         );
+                        chain_seed_nonce = chain_seed_nonce.wrapping_add(1);
                         cf.absorb_shared_object_writes(&initial_resource_writes);
                         let mut bootstrap_seed = seed_inputs;
                         if bootstrap_seed.is_empty() {
@@ -613,7 +673,23 @@ pub fn entrypoint(
                         new_count += 1;
                     }
 
-                    // Also propose sequence extensions from the SequenceDb
+                    if new_count > 0 {
+                        info!(
+                            "spawned {new_count} new chain fuzzers from DUG reconstruction (total: {})",
+                            chain_fuzzers.len()
+                        );
+                    }
+
+                    last_chain_reconstruction = Instant::now();
+                }
+
+                if last_sequence_mutation.elapsed().as_secs() >= SEQUENCE_MUTATION_INTERVAL_SECS {
+                    let existing_step_sets: Vec<Vec<usize>> = chain_fuzzers
+                        .iter()
+                        .map(|cf| cf.chain_steps().to_vec())
+                        .collect();
+
+                    // Propose sequence extensions from SequenceDb
                     let extensions =
                         seq_db.propose_extensions(d, max_chain_length, max_chain_repetition, 10);
                     let mut ext_count = 0usize;
@@ -634,13 +710,14 @@ pub fn entrypoint(
 
                         let mut cf = ChainFuzzer::new(
                             executor.clone(),
-                            seed_val,
+                            derive_seed(seed_val, chain_seed_nonce),
                             ext_chain,
                             &entrypoints,
                             type_pool.clone(),
                             cov_trace_path.clone(),
                             dict_string.clone(),
                         );
+                        chain_seed_nonce = chain_seed_nonce.wrapping_add(1);
                         cf.absorb_shared_object_writes(&initial_resource_writes);
                         cf.import_parent_seed(parent_seed);
                         chain_fuzzers.push(cf);
@@ -666,32 +743,55 @@ pub fn entrypoint(
 
                         let mut cf = ChainFuzzer::new(
                             executor.clone(),
-                            seed_val,
+                            derive_seed(seed_val, chain_seed_nonce),
                             mut_chain,
                             &entrypoints,
                             type_pool.clone(),
                             cov_trace_path.clone(),
                             dict_string.clone(),
                         );
+                        chain_seed_nonce = chain_seed_nonce.wrapping_add(1);
                         cf.absorb_shared_object_writes(&initial_resource_writes);
                         cf.import_parent_seed(parent_seed);
                         chain_fuzzers.push(cf);
                         mut_count += 1;
                     }
 
-                    if new_count + ext_count + mut_count > 0 {
+                    if ext_count + mut_count > 0 {
                         info!(
-                            "spawned {} new chain fuzzers ({new_count} from DUG, {ext_count} from extensions, {mut_count} from mutations, total: {})",
-                            new_count + ext_count + mut_count,
+                            "spawned {} new chain fuzzers ({ext_count} from extensions, {mut_count} from mutations, total: {})",
+                            ext_count + mut_count,
                             chain_fuzzers.len()
                         );
                     }
 
-                    last_chain_reconstruction = Instant::now();
+                    last_sequence_mutation = Instant::now();
                 }
+            }
+
+            if phase2_entered
+                && coverage_delta == 0
+                && last_phase2_novelty.elapsed().as_secs() >= saturation_secs
+            {
+                info!(
+                    "Phase 2 saturated after {}s without coverage/DUG novelty for {}s. Stopping.",
+                    start_time.elapsed().as_secs(),
+                    saturation_secs
+                );
+                return Ok(());
             }
         }
     }
+}
+
+/// Mix two u64 values into a deterministic, well-scrambled seed.
+fn derive_seed(base: u64, salt: u64) -> u64 {
+    let mut x = base ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^ (x >> 31)
 }
 
 /// Maximum number of instantiations to generate per generic struct

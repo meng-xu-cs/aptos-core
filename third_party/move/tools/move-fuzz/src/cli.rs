@@ -505,6 +505,7 @@ fn cmd_auto(
         // NOTE: as `pkgs` are in the topological order of the dependency graph, so are `pkg_defs`
         pkg_defs.push(PkgDefinition {
             kind: pkg_decl.kind,
+            manifest_path: manifest.path.clone(),
             package: pkg_built,
         });
     }

@@ -17,7 +17,17 @@ use legacy_move_compiler::compiled_unit::CompiledUnit;
 use log::{debug, info};
 use move_core_types::ability::AbilitySet;
 use move_package::compilation::compiled_package::CompiledUnitWithSource;
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::{Path, PathBuf},
+};
+use walkdir::WalkDir;
+
+/// Hard caps to avoid exploding script counts with near-duplicate wrappers.
+const MAX_SCRIPTS_PER_FUNCTION: usize = 24;
+const MAX_SCRIPTS_PER_MODULE: usize = 96;
 
 /// A database that holds information we can statically get from the packages
 pub struct Model {
@@ -57,18 +67,40 @@ impl Model {
         for pkg in pkgs {
             let pkg_kind = pkg.kind;
             let pkg_details = &pkg.package.package;
+            let package_root = pkg.manifest_path.as_path();
+            let module_source_index = index_package_module_sources(package_root);
             for CompiledUnitWithSource {
                 unit,
-                source_path: _,
+                source_path,
             } in &pkg_details.root_compiled_units
             {
                 let module = match unit {
                     CompiledUnit::Script(_) => continue,
                     CompiledUnit::Module(m) => &m.module,
                 };
+                let module_name = module.self_id().name().to_string();
+                let source_text = read_module_source(
+                    package_root,
+                    source_path,
+                    &module_name,
+                    &module_source_index,
+                );
+                if source_text.is_none() && matches!(pkg_kind, PkgKind::Primary) {
+                    debug!(
+                        "missing source text for module {} (source_path: {}, package_root: {})",
+                        module.self_id(),
+                        source_path.display(),
+                        package_root.display(),
+                    );
+                }
 
                 // go over all datatypes defined
-                function_registry.analyze(&datatype_registry, module, pkg_kind);
+                function_registry.analyze(
+                    &datatype_registry,
+                    module,
+                    pkg_kind,
+                    source_text.as_deref(),
+                );
             }
             debug!(
                 "function registry populated for package {}",
@@ -97,20 +129,37 @@ impl Model {
         let mut primary_func_count = 0;
         let mut module_script_counts: BTreeMap<String, usize> = BTreeMap::new();
 
-        // go over all function declarations
+        // Dedup key set for generated scripts.
+        let mut generated_keys = BTreeSet::new();
+
+        // Sort primary declarations to process entry functions first.
+        let mut primary_decls: Vec<_> = self
+            .function_registry
+            .iter_decls()
+            .filter(|decl| matches!(decl.kind, PkgKind::Primary))
+            .collect();
+        primary_decls.sort_by_key(|decl| (Reverse(decl.is_entry), decl.ident.clone()));
+
+        // go over primary declarations (entry-first)
         let mut generated_scripts = vec![];
-        for decl in self.function_registry.iter_decls() {
-            // focus on the primary functions for now
-            // TODO(mengxu): in the future we should consider functions in dependencies as well
-            if !matches!(decl.kind, PkgKind::Primary) {
+        for decl in primary_decls {
+            primary_func_count += 1;
+            let module_key = format!("{}::{}", decl.ident.address(), decl.ident.module_name());
+            let module_cap_reached = module_script_counts
+                .get(&module_key)
+                .is_some_and(|n| *n >= MAX_SCRIPTS_PER_MODULE);
+            if module_cap_reached {
+                debug!(
+                    "skipping {}: module {module_key} already reached cap ({MAX_SCRIPTS_PER_MODULE})",
+                    decl.ident
+                );
                 continue;
             }
 
-            primary_func_count += 1;
-            let module_key = format!("{}::{}", decl.ident.address(), decl.ident.module_name());
             info!(
-                "processing primary function: {} (generics: {}, params: {}, returns: {})",
+                "processing primary function: {} (entry: {}, generics: {}, params: {}, returns: {})",
                 decl.ident,
+                decl.is_entry,
                 decl.generics.len(),
                 decl.parameters.len(),
                 decl.return_sig.len(),
@@ -124,9 +173,10 @@ impl Model {
                 .product();
             info!("- {num_combos} ability set combinations to explore");
 
-            let scripts_before = generated_scripts.len();
+            let mut scripts_for_func = 0usize;
+            let module_count = module_script_counts.entry(module_key.clone()).or_insert(0);
 
-            for combo in decl
+            'combo_loop: for combo in decl
                 .generics
                 .iter()
                 .map(|constraint| ability_set_candidates(*constraint))
@@ -146,7 +196,8 @@ impl Model {
                 let mut any_param_infeasible = None;
                 let mut per_param_candidates = vec![];
                 for (idx, fn_params, fn_returns) in lambda_params {
-                    let candidates = find_matching_functions(self, &fn_params, &fn_returns);
+                    let candidates =
+                        find_matching_functions(self, decl, &fn_params, &fn_returns);
                     if candidates.is_empty() {
                         any_param_infeasible = Some(idx);
                         break;
@@ -189,9 +240,27 @@ impl Model {
                     let raw_count = raw_graphs.len();
                     let mut feasible_count = 0;
                     for graph in raw_graphs {
+                        if scripts_for_func >= MAX_SCRIPTS_PER_FUNCTION {
+                            debug!(
+                                "reached per-function cap ({MAX_SCRIPTS_PER_FUNCTION}) for {}",
+                                decl.ident
+                            );
+                            break 'combo_loop;
+                        }
+                        if *module_count >= MAX_SCRIPTS_PER_MODULE {
+                            debug!(
+                                "reached per-module cap ({MAX_SCRIPTS_PER_MODULE}) for {module_key}"
+                            );
+                            break 'combo_loop;
+                        }
+
                         if builder.is_feasible(&graph) {
                             let graph = graph.compact_generics();
                             let canvas = DriverCanvas::build(self, &graph, &bindings);
+                            let dedup_key = canvas.dedup_key(&decl.ident);
+                            if !generated_keys.insert(dedup_key) {
+                                continue;
+                            }
                             let script = canvas.generate_script(
                                 generated_scripts.len(),
                                 &decl.ident,
@@ -199,6 +268,8 @@ impl Model {
                             );
                             generated_scripts.push(script);
                             feasible_count += 1;
+                            scripts_for_func += 1;
+                            *module_count += 1;
                         }
                     }
                     debug!(
@@ -207,9 +278,7 @@ impl Model {
                 }
             }
 
-            let scripts_for_func = generated_scripts.len() - scripts_before;
             info!("  -> {scripts_for_func} script(s) for {}", decl.ident);
-            *module_script_counts.entry(module_key).or_insert(0) += scripts_for_func;
         }
 
         // print summary
@@ -225,6 +294,83 @@ impl Model {
         // done
         generated_scripts
     }
+}
+
+fn read_module_source(
+    package_root: &Path,
+    source_path: &Path,
+    module_name: &str,
+    module_source_index: &BTreeMap<String, PathBuf>,
+) -> Option<String> {
+    if let Some(indexed_path) = module_source_index.get(module_name) {
+        if let Ok(src) = fs::read_to_string(indexed_path) {
+            return Some(src);
+        }
+    }
+
+    fs::read_to_string(source_path)
+        .or_else(|_| {
+            if source_path.is_absolute() {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "absolute source path not readable",
+                ))
+            } else {
+                fs::read_to_string(package_root.join(source_path))
+            }
+        })
+        .ok()
+}
+
+fn index_package_module_sources(package_root: &Path) -> BTreeMap<String, PathBuf> {
+    let mut index = BTreeMap::new();
+
+    for relative_root in ["sources", "scripts"] {
+        let dir = package_root.join(relative_root);
+        if !dir.exists() {
+            continue;
+        }
+
+        for entry in WalkDir::new(dir).into_iter().filter_map(Result::ok) {
+            let path = entry.path();
+            if !entry.file_type().is_file()
+                || path.extension().is_none_or(|ext| ext != "move")
+            {
+                continue;
+            }
+
+            let source = match fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            for module_name in parse_declared_module_names(&source) {
+                index.entry(module_name).or_insert_with(|| path.to_path_buf());
+            }
+        }
+    }
+
+    index
+}
+
+fn parse_declared_module_names(source: &str) -> Vec<String> {
+    let mut names = vec![];
+    for line in source.lines() {
+        let s = line.trim_start();
+        let Some(rest) = s.strip_prefix("module ") else {
+            continue;
+        };
+        let module_spec: String = rest
+            .chars()
+            .take_while(|c| !c.is_whitespace() && *c != '{')
+            .collect();
+        if let Some((_, module_name)) = module_spec.rsplit_once("::") {
+            if !module_name.is_empty() {
+                names.push(module_name.to_string());
+            }
+        }
+    }
+    names
 }
 
 /// Identify `Function`-typed parameters in a function instantiation (decl + type args).
@@ -268,12 +414,24 @@ fn find_lambda_params(
 /// 4. All generic type parameters are fully resolved
 fn find_matching_functions(
     model: &Model,
+    caller_decl: &FunctionDecl,
     fn_params: &[TypeItem],
     fn_returns: &[TypeItem],
 ) -> Vec<(FunctionIdent, Vec<TypeBase>)> {
     let mut matches = vec![];
 
     for decl in model.function_registry.iter_decls() {
+        // Keep callback matching inside primary packages to avoid pulling
+        // framework/dependency helper APIs as lambda targets.
+        if !matches!(decl.kind, PkgKind::Primary) {
+            continue;
+        }
+
+        // Avoid immediately recursing into the same function as callback target.
+        if decl.ident == caller_decl.ident {
+            continue;
+        }
+
         // check arity
         if decl.parameters.len() != fn_params.len() {
             continue;

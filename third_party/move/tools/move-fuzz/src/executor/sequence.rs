@@ -47,6 +47,18 @@ pub struct ResourceTag {
     pub struct_tag: StructTag,
 }
 
+fn should_track_resource_tag(account: AccountAddress, struct_tag: &StructTag) -> bool {
+    // Skip synthetic table/raw keys and high-volume prologue context keys
+    // to keep the DUG focused on contract state dependencies.
+    if account == AccountAddress::ONE {
+        let module = struct_tag.module.as_str();
+        if module == "global_state" || module == "transaction_context" {
+            return false;
+        }
+    }
+    true
+}
+
 /// Concrete transaction inputs for one script invocation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SeedInput {
@@ -107,19 +119,23 @@ impl ExecResourceProfile {
     ) -> Self {
         let mut reads = BTreeSet::new();
         for read in resource_reads {
-            reads.insert(ResourceTag {
-                account: read.address,
-                struct_tag: read.struct_tag.clone(),
-            });
+            if should_track_resource_tag(read.address, &read.struct_tag) {
+                reads.insert(ResourceTag {
+                    account: read.address,
+                    struct_tag: read.struct_tag.clone(),
+                });
+            }
         }
 
         let mut writes = BTreeSet::new();
         if succeeded {
             for write in resource_writes {
-                writes.insert(ResourceTag {
-                    account: write.address,
-                    struct_tag: write.struct_tag.clone(),
-                });
+                if should_track_resource_tag(write.address, &write.struct_tag) {
+                    writes.insert(ResourceTag {
+                        account: write.address,
+                        struct_tag: write.struct_tag.clone(),
+                    });
+                }
             }
         }
 
@@ -195,10 +211,12 @@ pub fn discover_profiles(
             if let Ok((vm_status, txn_status, resource_writes, resource_reads)) = result {
                 // collect reads
                 for read in &resource_reads {
-                    all_reads.insert(ResourceTag {
-                        account: read.address,
-                        struct_tag: read.struct_tag.clone(),
-                    });
+                    if should_track_resource_tag(read.address, &read.struct_tag) {
+                        all_reads.insert(ResourceTag {
+                            account: read.address,
+                            struct_tag: read.struct_tag.clone(),
+                        });
+                    }
                 }
 
                 // collect writes only from successful executions
@@ -212,10 +230,12 @@ pub fn discover_profiles(
                 if is_success {
                     ever_succeeded = true;
                     for write in &resource_writes {
-                        all_writes.insert(ResourceTag {
-                            account: write.address,
-                            struct_tag: write.struct_tag.clone(),
-                        });
+                        if should_track_resource_tag(write.address, &write.struct_tag) {
+                            all_writes.insert(ResourceTag {
+                                account: write.address,
+                                struct_tag: write.struct_tag.clone(),
+                            });
+                        }
                     }
                 }
             }
@@ -629,8 +649,14 @@ pub struct SequenceDb {
     next_id: u64,
 }
 
-/// Probability of drawing a seed from the SequenceDb instead of local corpus
-const SEQ_DB_PROB: u8 = 20;
+/// Base probability of drawing a seed from the SequenceDb.
+const SEQ_DB_PROB_BASE: u8 = 20;
+/// Boosted probability when local corpus is stale.
+const SEQ_DB_PROB_STALE: u8 = 50;
+/// Boosted probability when local corpus is empty.
+const SEQ_DB_PROB_EMPTY_CORPUS: u8 = 80;
+/// Duration after which local corpus is considered stale.
+const CORPUS_STALE_SECS: u64 = 60;
 
 impl Default for SequenceDb {
     fn default() -> Self {
@@ -1038,6 +1064,19 @@ pub fn construct_seed_chains(
 ) -> Vec<SeedChain> {
     let mut targets: Vec<usize> = (0..dug.num_seeds()).collect();
     targets.shuffle(rng);
+    targets.sort_by(|a, b| {
+        let a_unresolved = dug
+            .seed_uses_of(*a)
+            .difference(dug.seed_defs_of(*a))
+            .count();
+        let b_unresolved = dug
+            .seed_uses_of(*b)
+            .difference(dug.seed_defs_of(*b))
+            .count();
+        let a_failed = !dug.seed_node(*a).succeeded;
+        let b_failed = !dug.seed_node(*b).succeeded;
+        b_unresolved.cmp(&a_unresolved).then_with(|| b_failed.cmp(&a_failed))
+    });
 
     let mut chains = Vec::new();
     for target_seed_node in targets {
@@ -1373,6 +1412,19 @@ impl ChainFuzzer {
             .sum()
     }
 
+    /// Globalized coverage keys for cross-fuzzer deduplication.
+    pub fn coverage_keys(&self) -> BTreeSet<String> {
+        let mut keys = BTreeSet::new();
+        for (module, module_map) in &self.coverage.module_maps {
+            for (function, entries) in &module_map.function_maps {
+                for entry in entries {
+                    keys.insert(format!("{module:?}:{function}:{entry:?}"));
+                }
+            }
+        }
+        keys
+    }
+
     /// Get the total number of executions
     pub fn exec_count(&self) -> u64 {
         self.exec_count
@@ -1425,10 +1477,20 @@ impl ChainFuzzer {
     )> {
         let num_steps = self.chain.len();
 
-        // Decide seed source: SequenceDb prefix (20%), local corpus, or generate
+        // Decide seed source: adaptive SequenceDb prefix share, local corpus, or fresh generation.
+        let seq_db_prob = if self.seedpool.is_empty() {
+            SEQ_DB_PROB_EMPTY_CORPUS
+        } else if self
+            .last_new_coverage_time
+            .is_none_or(|t| t.elapsed().as_secs() >= CORPUS_STALE_SECS)
+        {
+            SEQ_DB_PROB_STALE
+        } else {
+            SEQ_DB_PROB_BASE
+        };
         let db_prefix_seed: Option<Vec<SeedInput>> = seq_db
             .filter(|db| db.prefix_compatible_count(&self.chain.steps) > 0)
-            .filter(|_| self.mutators[0].random_percent() < SEQ_DB_PROB)
+            .filter(|_| self.mutators[0].random_percent() < seq_db_prob)
             .and_then(|db| db.pick_prefix_seed(&self.chain.steps, self.mutators[0].rng_mut()));
 
         // Generate or mutate inputs for ALL steps up front
@@ -1587,8 +1649,18 @@ impl ChainFuzzer {
             self.last_new_coverage_time = Some(Instant::now());
         }
         let seed_clone = step_inputs[..step_raw_profiles.len()].to_vec();
-        if found_new && completed_chain {
-            self.seedpool.push(step_inputs);
+        let successful_prefix_len = step_raw_profiles.iter().take_while(|s| s.3).count();
+        let progressed_state = step_raw_profiles
+            .iter()
+            .take(successful_prefix_len.max(usize::from(completed_chain)))
+            .any(|(_, writes, _, succeeded)| *succeeded && !writes.is_empty());
+        if found_new || progressed_state {
+            let retain_len = if completed_chain {
+                self.chain.len()
+            } else {
+                step_raw_profiles.len()
+            };
+            self.remember_seed(seed_clone[..retain_len].to_vec());
         }
         let profiles = step_raw_profiles
             .iter()
@@ -1607,6 +1679,39 @@ impl ChainFuzzer {
         ))
     }
 
+    fn random_seed_for_step(&mut self, step_idx: usize) -> SeedInput {
+        let sig = &self.step_sigs[step_idx];
+        let ty_args = self.mutators[step_idx].random_type_args(&sig.generics);
+        let args: Vec<MoveValue> = sig
+            .parameters
+            .iter()
+            .filter(|ty| !matches!(ty, BasicInput::Signer))
+            .map(|ty| self.mutators[step_idx].random_value(ty))
+            .collect();
+        SeedInput {
+            sender: self.mutators[step_idx].random_signer(),
+            ty_args,
+            args,
+        }
+    }
+
+    fn normalize_seed_len(&mut self, mut seed: Vec<SeedInput>) -> Vec<SeedInput> {
+        let chain_len = self.chain.len();
+        while seed.len() < chain_len {
+            seed.push(self.random_seed_for_step(seed.len()));
+        }
+        seed.truncate(chain_len);
+        seed
+    }
+
+    /// Remember a concrete chain seed in local corpus (deduplicated).
+    pub fn remember_seed(&mut self, seed: Vec<SeedInput>) {
+        let normalized = self.normalize_seed_len(seed);
+        if !self.seedpool.contains(&normalized) {
+            self.seedpool.push(normalized);
+        }
+    }
+
     /// Absorb shared object discoveries from other fuzzers
     pub fn absorb_shared_object_writes(&mut self, writes: &[ResourceWrite]) {
         for mutator in self.mutators.iter_mut() {
@@ -1622,22 +1727,9 @@ impl ChainFuzzer {
         let mut parent_seed: Vec<SeedInput> = parent_seed.into_iter().map(Into::into).collect();
         let chain_len = self.chain.len();
         while parent_seed.len() < chain_len {
-            let step_idx = parent_seed.len();
-            let sig = &self.step_sigs[step_idx];
-            let ty_args = self.mutators[step_idx].random_type_args(&sig.generics);
-            let args: Vec<MoveValue> = sig
-                .parameters
-                .iter()
-                .filter(|ty| !matches!(ty, BasicInput::Signer))
-                .map(|ty| self.mutators[step_idx].random_value(ty))
-                .collect();
-            parent_seed.push(SeedInput {
-                sender: self.mutators[step_idx].random_signer(),
-                ty_args,
-                args,
-            });
+            parent_seed.push(self.random_seed_for_step(parent_seed.len()));
         }
-        self.seedpool.push(parent_seed);
+        self.remember_seed(parent_seed);
     }
 
     /// Update coverage map, return true if new coverage is found

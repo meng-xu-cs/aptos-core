@@ -141,6 +141,7 @@ pub struct PkgDeclaration {
 /// A wrapper over BuiltPackage that also marks what kind of package this is
 pub struct PkgDefinition {
     pub kind: PkgKind,
+    pub manifest_path: PathBuf,
     pub package: BuiltPackage,
 }
 
