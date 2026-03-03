@@ -6,7 +6,7 @@ use crate::{
     deps::{PkgDefinition, PkgManifest},
     executor::{
         oneshot::{ExecStatus, OneshotFuzzer},
-        sequence::{self, ChainFuzzer, DefUseGraph, MAX_CHAIN_FUZZERS},
+        sequence::{self, ChainFuzzer, DefUseGraph, SequenceDb, MAX_CHAIN_FUZZERS},
         tracing::TracingExecutor,
     },
     language::LanguageSetting,
@@ -188,6 +188,9 @@ pub fn entrypoint(
         dug.num_scripts()
     );
 
+    // create the central Sequence Database for cross-fuzzer sharing
+    let mut seq_db = SequenceDb::new();
+
     // construct dependency chains via backward DUG traversal
     let mut chain_rng = StdRng::seed_from_u64(seed_val);
     let chains = sequence::construct_chains(
@@ -288,7 +291,8 @@ pub fn entrypoint(
 
         // run chain fuzzers
         for (idx, fuzzer) in chain_fuzzers.iter_mut().enumerate() {
-            let (status, corpus_size, found_new, writes, profiles) = fuzzer.run_one()?;
+            let (status, corpus_size, found_new, writes, profiles, seed_opt) =
+                fuzzer.run_one(Some(&seq_db))?;
             round_writes.extend(writes);
             *category_counts.entry(status.category()).or_insert(0) += 1;
             *stats.entry(status.to_string()).or_insert(0) += 1;
@@ -297,6 +301,17 @@ pub fn entrypoint(
             // feed per-step profiles into the DUG
             for p in &profiles {
                 dug.ingest_profile(p);
+            }
+
+            // store coverage-producing seed in the SequenceDb
+            if found_new {
+                if let Some(seed) = seed_opt {
+                    seq_db.add_entry(
+                        fuzzer.chain_steps().to_vec(),
+                        seed,
+                        &profiles,
+                    );
+                }
             }
 
             if !matches!(status, ExecStatus::Success) && !seen_exec_stats.contains(&status) {
@@ -431,9 +446,10 @@ pub fn entrypoint(
                 .map(|(k, v)| format!("{k}:{v}"))
                 .collect();
             debug!(
-                "  outcomes: {} | unique: {}",
+                "  outcomes: {} | unique: {} | seq_db: {} entries",
                 outcome_parts.join(" | "),
-                seen_exec_stats.len()
+                seen_exec_stats.len(),
+                seq_db.len()
             );
 
             // write JSON stats atomically
@@ -449,6 +465,7 @@ pub fn entrypoint(
                 "scripts": script_json,
                 "outcomes": &stats,
                 "outcome_categories": &category_counts,
+                "sequence_db_entries": seq_db.len(),
             });
             let tmp_path = path_fuzz_stats.with_added_extension("tmp");
             if let Ok(data) = serde_json::to_string_pretty(&stats_json) {
@@ -510,9 +527,44 @@ pub fn entrypoint(
                     new_count += 1;
                 }
 
-                if new_count > 0 {
+                // Also propose sequence extensions from the SequenceDb
+                let extensions =
+                    seq_db.propose_extensions(&dug, max_chain_length, 10);
+                let mut ext_count = 0usize;
+                for (ext_chain, parent_seed) in extensions {
+                    if chain_fuzzers.len() >= MAX_CHAIN_FUZZERS {
+                        break;
+                    }
+                    // Dedup: also collect newly added chains' steps
+                    let already_exists = existing_step_sets
+                        .iter()
+                        .any(|existing| existing.as_slice() == ext_chain.steps.as_slice())
+                        || chain_fuzzers[existing_step_sets.len()..]
+                            .iter()
+                            .any(|cf| cf.chain_steps() == ext_chain.steps.as_slice());
+                    if already_exists {
+                        continue;
+                    }
+
+                    let mut cf = ChainFuzzer::new(
+                        executor.clone(),
+                        seed_val,
+                        ext_chain,
+                        &entrypoints,
+                        type_pool.clone(),
+                        cov_trace_path.clone(),
+                        dict_string.clone(),
+                    );
+                    cf.absorb_shared_object_writes(&initial_resource_writes);
+                    cf.import_parent_seed(parent_seed);
+                    chain_fuzzers.push(cf);
+                    ext_count += 1;
+                }
+
+                if new_count + ext_count > 0 {
                     info!(
-                        "spawned {new_count} new chain fuzzers (total: {})",
+                        "spawned {} new chain fuzzers ({new_count} from DUG, {ext_count} from extensions, total: {})",
+                        new_count + ext_count,
                         chain_fuzzers.len()
                     );
                 }

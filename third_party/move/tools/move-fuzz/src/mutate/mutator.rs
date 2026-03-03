@@ -498,6 +498,16 @@ impl Mutator {
         self.random_address()
     }
 
+    /// Generate a random percentage value in [0, 100)
+    pub fn random_percent(&mut self) -> u8 {
+        self.rng.gen_range(0u8, 100)
+    }
+
+    /// Get a mutable reference to the internal RNG
+    pub fn rng_mut(&mut self) -> &mut StdRng {
+        &mut self.rng
+    }
+
     /// Update the object dictionary from write set resource writes.
     ///
     /// Pass 1: identify object addresses (those with ObjectGroup resource group).

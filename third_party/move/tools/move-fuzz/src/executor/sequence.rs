@@ -421,6 +421,21 @@ impl DefUseGraph {
     pub fn modification_marker(&self) -> usize {
         self.modification_count
     }
+
+    /// Look up the type node index for a ResourceTag.
+    pub fn type_index_of(&self, tag: &ResourceTag) -> Option<&usize> {
+        self.type_index.get(tag)
+    }
+
+    /// Scripts that consume (read) a given type node.
+    ///
+    /// Only called during periodic reconstruction, not in the hot loop,
+    /// so linear iteration over all scripts is acceptable.
+    pub fn consumers_of(&self, type_node: usize) -> BTreeSet<usize> {
+        (0..self.num_scripts)
+            .filter(|&si| self.uses[si].contains(&type_node))
+            .collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -448,6 +463,187 @@ impl Chain {
     /// Whether the chain is empty
     pub fn is_empty(&self) -> bool {
         self.steps.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sequence Database
+// ---------------------------------------------------------------------------
+
+/// A stored sequence: the chain steps + the seed inputs that produced new coverage.
+#[derive(Clone)]
+pub struct SequenceEntry {
+    /// Unique monotonic identifier
+    pub id: u64,
+    /// Ordered script indices (same semantics as Chain.steps)
+    pub steps: Vec<usize>,
+    /// Per-step (type_args, value_args) — len == steps.len()
+    pub seed: Vec<(Vec<VmTypeTag>, Vec<MoveValue>)>,
+    /// Resource types written by the whole sequence (union of all step writes)
+    pub produced_types: BTreeSet<ResourceTag>,
+    /// Resource types read by the whole sequence (union of all step reads)
+    pub consumed_types: BTreeSet<ResourceTag>,
+    /// Whether all steps succeeded
+    pub all_succeeded: bool,
+}
+
+/// Central store of coverage-producing multi-transaction sequences.
+///
+/// Provides:
+/// 1. Cross-fuzzer seed sharing via prefix matching
+/// 2. Sequence extension proposals based on DUG connectivity
+pub struct SequenceDb {
+    entries: Vec<SequenceEntry>,
+    next_id: u64,
+}
+
+/// Probability of drawing a seed from the SequenceDb instead of local corpus
+const SEQ_DB_PROB: u8 = 20;
+
+impl Default for SequenceDb {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SequenceDb {
+    /// Create a new empty sequence database
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            next_id: 0,
+        }
+    }
+
+    /// Add an entry from a ChainFuzzer coverage discovery.
+    ///
+    /// `steps` and `seed` come from the chain fuzzer, `profiles` are the
+    /// per-step ExecResourceProfiles generated when new coverage was found.
+    /// Returns the entry's unique ID.
+    pub fn add_entry(
+        &mut self,
+        steps: Vec<usize>,
+        seed: Vec<(Vec<VmTypeTag>, Vec<MoveValue>)>,
+        profiles: &[ExecResourceProfile],
+    ) -> u64 {
+        assert_eq!(steps.len(), seed.len());
+
+        let mut produced_types = BTreeSet::new();
+        let mut consumed_types = BTreeSet::new();
+        let mut all_succeeded = true;
+
+        for p in profiles {
+            produced_types.extend(p.writes.iter().cloned());
+            consumed_types.extend(p.reads.iter().cloned());
+            if !p.succeeded {
+                all_succeeded = false;
+            }
+        }
+
+        let id = self.next_id;
+        self.next_id += 1;
+
+        self.entries.push(SequenceEntry {
+            id,
+            steps,
+            seed,
+            produced_types,
+            consumed_types,
+            all_succeeded,
+        });
+
+        id
+    }
+
+    /// Find all entries whose `steps` are a prefix of (or equal to) `chain_steps`.
+    pub fn find_prefix_seeds(&self, chain_steps: &[usize]) -> Vec<&SequenceEntry> {
+        self.entries
+            .iter()
+            .filter(|e| {
+                e.steps.len() <= chain_steps.len()
+                    && e.steps.as_slice() == &chain_steps[..e.steps.len()]
+            })
+            .collect()
+    }
+
+    /// Count prefix-compatible entries for a given chain.
+    pub fn prefix_compatible_count(&self, chain_steps: &[usize]) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| {
+                e.steps.len() <= chain_steps.len()
+                    && e.steps.as_slice() == &chain_steps[..e.steps.len()]
+            })
+            .count()
+    }
+
+    /// Pick a random prefix-compatible entry's seed, truncated to the prefix length.
+    pub fn pick_prefix_seed(
+        &self,
+        chain_steps: &[usize],
+        rng: &mut StdRng,
+    ) -> Option<Vec<(Vec<VmTypeTag>, Vec<MoveValue>)>> {
+        let compatible: Vec<_> = self.find_prefix_seeds(chain_steps);
+        if compatible.is_empty() {
+            return None;
+        }
+        let entry = compatible[rng.gen_range(0, compatible.len())];
+        // Return seed truncated to the prefix length
+        Some(entry.seed[..entry.steps.len()].to_vec())
+    }
+
+    /// Propose sequence extensions by appending DUG-linked consumers.
+    ///
+    /// For each all-succeeded entry shorter than `max_chain_length`, finds scripts
+    /// that consume types produced by the sequence and creates extended chains.
+    /// Returns `(extended_chain, parent_seed)` pairs (max `max_extensions`).
+    pub fn propose_extensions(
+        &self,
+        dug: &DefUseGraph,
+        max_chain_length: usize,
+        max_extensions: usize,
+    ) -> Vec<(Chain, Vec<(Vec<VmTypeTag>, Vec<MoveValue>)>)> {
+        let mut extensions = Vec::new();
+
+        for entry in &self.entries {
+            if !entry.all_succeeded || entry.steps.len() >= max_chain_length {
+                continue;
+            }
+
+            for tag in &entry.produced_types {
+                if let Some(&ti) = dug.type_index_of(tag) {
+                    for consumer in dug.consumers_of(ti) {
+                        // Don't add a script that's already in the chain
+                        if entry.steps.contains(&consumer) {
+                            continue;
+                        }
+
+                        let mut ext_steps = entry.steps.clone();
+                        ext_steps.push(consumer);
+                        extensions.push((
+                            Chain { steps: ext_steps },
+                            entry.seed.clone(),
+                        ));
+
+                        if extensions.len() >= max_extensions {
+                            return extensions;
+                        }
+                    }
+                }
+            }
+        }
+
+        extensions
+    }
+
+    /// Total number of entries in the database
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the database is empty
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 
@@ -769,26 +965,66 @@ impl ChainFuzzer {
 
     /// Execute one chain iteration.
     ///
-    /// Returns `(exec_status, corpus_size, found_new_coverage, resource_writes, profiles)`.
+    /// Returns `(exec_status, corpus_size, found_new_coverage, resource_writes, profiles, seed_clone)`.
     /// - `exec_status` is the status of the last step that executed (or the first failure)
     /// - Resource writes are accumulated from all successful steps
     /// - `profiles` contains per-step resource profiles when new coverage was found
+    /// - `seed_clone` is a copy of the coverage-producing seed (for SequenceDb), or None
+    ///
+    /// When `seq_db` is provided, there is a chance (SEQ_DB_PROB = 20%) that inputs
+    /// for the prefix steps are drawn from a compatible SequenceDb entry instead of
+    /// the local seed pool.
     pub fn run_one(
         &mut self,
+        seq_db: Option<&SequenceDb>,
     ) -> Result<(
         ExecStatus,
         usize,
         bool,
         Vec<ResourceWrite>,
         Vec<ExecResourceProfile>,
+        Option<Vec<(Vec<VmTypeTag>, Vec<MoveValue>)>>,
     )> {
         // Use the same signer for all steps in the chain
         let sender = self.mutators[0].random_signer();
         let num_steps = self.chain.len();
 
+        // Decide seed source: SequenceDb prefix (20%), local corpus, or generate
+        let db_prefix_seed: Option<Vec<(Vec<VmTypeTag>, Vec<MoveValue>)>> = seq_db
+            .filter(|db| db.prefix_compatible_count(&self.chain.steps) > 0)
+            .filter(|_| self.mutators[0].random_percent() < SEQ_DB_PROB)
+            .and_then(|db| db.pick_prefix_seed(&self.chain.steps, self.mutators[0].rng_mut()));
+
         // Generate or mutate inputs for ALL steps up front
         let step_inputs: Vec<(Vec<VmTypeTag>, Vec<MoveValue>)> = (0..num_steps)
             .map(|i| {
+                // If we have a SequenceDb prefix seed that covers this step, use it
+                // (with mutation applied)
+                if let Some(ref prefix) = db_prefix_seed {
+                    if i < prefix.len() {
+                        let sig = &self.step_sigs[i];
+                        let non_signer_params: Vec<_> = sig
+                            .parameters
+                            .iter()
+                            .filter(|ty| !matches!(ty, BasicInput::Signer))
+                            .collect();
+                        let (seed_ty, seed_args) = &prefix[i];
+                        let ty_args = if !sig.generics.is_empty()
+                            && self.mutators[i].should_mutate_type_args()
+                        {
+                            self.mutators[i].mutate_type_args(&sig.generics, seed_ty)
+                        } else {
+                            seed_ty.clone()
+                        };
+                        let args = seed_args
+                            .iter()
+                            .zip(non_signer_params.iter())
+                            .map(|(val, ty)| self.mutators[i].mutate_value(ty, val))
+                            .collect();
+                        return (ty_args, args);
+                    }
+                }
+
                 let sig = &self.step_sigs[i];
                 let non_signer_params: Vec<_> = sig
                     .parameters
@@ -885,6 +1121,7 @@ impl ChainFuzzer {
                     false,
                     all_writes,
                     vec![],
+                    None,
                 ));
             }
         }
@@ -895,17 +1132,19 @@ impl ChainFuzzer {
         self.exec_count += 1;
         let coverage_map = CoverageMap::from_trace_file(&self.trace_path)?;
         let found_new = self.update_coverage(coverage_map);
-        let profiles = if found_new {
+        let (profiles, seed_clone) = if found_new {
             self.last_new_coverage_time = Some(Instant::now());
+            let cloned = step_inputs.clone();
             self.seedpool.push(step_inputs);
-            step_raw_profiles
+            let profiles = step_raw_profiles
                 .iter()
                 .map(|(script_index, writes, reads, succeeded)| {
                     ExecResourceProfile::from_execution(*script_index, writes, reads, *succeeded)
                 })
-                .collect()
+                .collect();
+            (profiles, Some(cloned))
         } else {
-            vec![]
+            (vec![], None)
         };
 
         Ok((
@@ -914,6 +1153,7 @@ impl ChainFuzzer {
             found_new,
             all_writes,
             profiles,
+            seed_clone,
         ))
     }
 
@@ -922,6 +1162,30 @@ impl ChainFuzzer {
         for mutator in self.mutators.iter_mut() {
             mutator.update_object_dict(writes);
         }
+    }
+
+    /// Import a seed from a parent sequence (for sequence extension).
+    ///
+    /// The `parent_seed` covers the first `parent_seed.len()` steps of this chain.
+    /// Remaining steps get random inputs generated by their respective mutators.
+    pub fn import_parent_seed(
+        &mut self,
+        mut parent_seed: Vec<(Vec<VmTypeTag>, Vec<MoveValue>)>,
+    ) {
+        let chain_len = self.chain.len();
+        while parent_seed.len() < chain_len {
+            let step_idx = parent_seed.len();
+            let sig = &self.step_sigs[step_idx];
+            let ty_args = self.mutators[step_idx].random_type_args(&sig.generics);
+            let args: Vec<MoveValue> = sig
+                .parameters
+                .iter()
+                .filter(|ty| !matches!(ty, BasicInput::Signer))
+                .map(|ty| self.mutators[step_idx].random_value(ty))
+                .collect();
+            parent_seed.push((ty_args, args));
+        }
+        self.seedpool.push(parent_seed);
     }
 
     /// Update coverage map, return true if new coverage is found
@@ -1362,5 +1626,288 @@ mod tests {
         assert!(chain_to_1.is_some());
         let chain = chain_to_1.unwrap();
         assert!(chain.steps.contains(&0));
+    }
+
+    // -----------------------------------------------------------------------
+    // DUG accessor tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dug_type_index_of() {
+        let profiles = vec![
+            make_profile(0, vec![], vec!["A"], true),
+            make_profile(1, vec!["A"], vec!["B"], true),
+        ];
+        let dug = DefUseGraph::from_profiles(&profiles);
+
+        // Known tags should return Some
+        assert!(dug.type_index_of(&make_tag("A")).is_some());
+        assert!(dug.type_index_of(&make_tag("B")).is_some());
+        // Indices should be distinct
+        assert_ne!(
+            dug.type_index_of(&make_tag("A")),
+            dug.type_index_of(&make_tag("B"))
+        );
+        // Unknown tag should return None
+        assert!(dug.type_index_of(&make_tag("C")).is_none());
+    }
+
+    #[test]
+    fn test_dug_consumers_of() {
+        // S0 writes A, S1 and S2 read A
+        let profiles = vec![
+            make_profile(0, vec![], vec!["A"], true),
+            make_profile(1, vec!["A"], vec![], false),
+            make_profile(2, vec!["A"], vec![], false),
+        ];
+        let dug = DefUseGraph::from_profiles(&profiles);
+
+        let ti_a = *dug.type_index_of(&make_tag("A")).unwrap();
+        let consumers = dug.consumers_of(ti_a);
+        assert_eq!(consumers, BTreeSet::from([1, 2]));
+
+        // S0 doesn't read A, so it's not a consumer
+        assert!(!consumers.contains(&0));
+    }
+
+    // -----------------------------------------------------------------------
+    // SequenceDb tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: create an ExecResourceProfile for testing
+    fn make_exec_profile(
+        script_index: usize,
+        reads: Vec<&str>,
+        writes: Vec<&str>,
+        succeeded: bool,
+    ) -> ExecResourceProfile {
+        ExecResourceProfile {
+            script_index,
+            reads: reads.into_iter().map(make_tag).collect(),
+            writes: writes.into_iter().map(make_tag).collect(),
+            succeeded,
+        }
+    }
+
+    #[test]
+    fn test_seq_db_add_and_retrieve() {
+        let mut db = SequenceDb::new();
+        assert!(db.is_empty());
+        assert_eq!(db.len(), 0);
+
+        let profiles = vec![
+            make_exec_profile(0, vec![], vec!["A"], true),
+            make_exec_profile(1, vec!["A"], vec!["B"], true),
+        ];
+        let seed = vec![
+            (vec![], vec![MoveValue::U64(42)]),
+            (vec![], vec![MoveValue::Bool(true)]),
+        ];
+
+        let id = db.add_entry(vec![0, 1], seed.clone(), &profiles);
+        assert_eq!(id, 0);
+        assert_eq!(db.len(), 1);
+        assert!(!db.is_empty());
+
+        // Verify the entry
+        let entries = db.find_prefix_seeds(&[0, 1]);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].steps, vec![0, 1]);
+        assert!(entries[0].all_succeeded);
+        assert!(entries[0].produced_types.contains(&make_tag("A")));
+        assert!(entries[0].produced_types.contains(&make_tag("B")));
+        assert!(entries[0].consumed_types.contains(&make_tag("A")));
+    }
+
+    #[test]
+    fn test_seq_db_prefix_matching_exact() {
+        let mut db = SequenceDb::new();
+        let profiles = vec![
+            make_exec_profile(0, vec![], vec!["A"], true),
+            make_exec_profile(1, vec!["A"], vec!["B"], true),
+            make_exec_profile(2, vec!["B"], vec![], true),
+        ];
+        let seed = vec![
+            (vec![], vec![MoveValue::U64(1)]),
+            (vec![], vec![MoveValue::U64(2)]),
+            (vec![], vec![MoveValue::U64(3)]),
+        ];
+        db.add_entry(vec![0, 1, 2], seed, &profiles);
+
+        // Exact match
+        let matches = db.find_prefix_seeds(&[0, 1, 2]);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].steps, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_seq_db_prefix_matching_superchain() {
+        let mut db = SequenceDb::new();
+        let profiles = vec![
+            make_exec_profile(0, vec![], vec!["A"], true),
+            make_exec_profile(1, vec!["A"], vec![], true),
+        ];
+        let seed = vec![
+            (vec![], vec![MoveValue::U64(1)]),
+            (vec![], vec![MoveValue::U64(2)]),
+        ];
+        db.add_entry(vec![0, 1], seed, &profiles);
+
+        // Entry [0,1] is a prefix of chain [0,1,2]
+        let matches = db.find_prefix_seeds(&[0, 1, 2]);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].steps, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_seq_db_prefix_no_match() {
+        let mut db = SequenceDb::new();
+        let profiles = vec![
+            make_exec_profile(0, vec![], vec!["A"], true),
+            make_exec_profile(1, vec![], vec![], true),
+            make_exec_profile(3, vec![], vec![], true),
+        ];
+        let seed = vec![
+            (vec![], vec![MoveValue::U64(1)]),
+            (vec![], vec![MoveValue::U64(2)]),
+            (vec![], vec![MoveValue::U64(3)]),
+        ];
+        db.add_entry(vec![0, 1, 3], seed, &profiles);
+
+        // [0,1,3] is not a prefix of [0,1,2] (step 2 at position 2 differs from step 3)
+        let matches = db.find_prefix_seeds(&[0, 1, 2]);
+        assert_eq!(matches.len(), 0);
+    }
+
+    #[test]
+    fn test_seq_db_prefix_longer_entry() {
+        let mut db = SequenceDb::new();
+        let profiles = vec![
+            make_exec_profile(0, vec![], vec!["A"], true),
+            make_exec_profile(1, vec![], vec![], true),
+            make_exec_profile(2, vec![], vec![], true),
+            make_exec_profile(3, vec![], vec![], true),
+        ];
+        let seed = vec![
+            (vec![], vec![MoveValue::U64(1)]),
+            (vec![], vec![MoveValue::U64(2)]),
+            (vec![], vec![MoveValue::U64(3)]),
+            (vec![], vec![MoveValue::U64(4)]),
+        ];
+        db.add_entry(vec![0, 1, 2, 3], seed, &profiles);
+
+        // Entry [0,1,2,3] is longer than chain [0,1], not a prefix
+        let matches = db.find_prefix_seeds(&[0, 1]);
+        assert_eq!(matches.len(), 0);
+    }
+
+    #[test]
+    fn test_seq_db_propose_extensions() {
+        // DUG: S0 writes A, S1 reads A and writes B, S2 reads B
+        let profiles = vec![
+            make_profile(0, vec![], vec!["A"], true),
+            make_profile(1, vec!["A"], vec!["B"], true),
+            make_profile(2, vec!["B"], vec![], false),
+        ];
+        let dug = DefUseGraph::from_profiles(&profiles);
+
+        let mut db = SequenceDb::new();
+        // Stored sequence [0, 1] that produced type B
+        let exec_profiles = vec![
+            make_exec_profile(0, vec![], vec!["A"], true),
+            make_exec_profile(1, vec!["A"], vec!["B"], true),
+        ];
+        let seed = vec![
+            (vec![], vec![MoveValue::U64(1)]),
+            (vec![], vec![MoveValue::U64(2)]),
+        ];
+        db.add_entry(vec![0, 1], seed, &exec_profiles);
+
+        // Should propose [0, 1, 2] because S2 reads B which is produced by the sequence
+        let extensions = db.propose_extensions(&dug, 5, 10);
+        assert!(!extensions.is_empty());
+        let ext_chain = &extensions[0].0;
+        assert_eq!(ext_chain.steps, vec![0, 1, 2]);
+        // Parent seed should have 2 entries (for the prefix)
+        assert_eq!(extensions[0].1.len(), 2);
+    }
+
+    #[test]
+    fn test_seq_db_no_extension_for_failing_sequence() {
+        let profiles = vec![
+            make_profile(0, vec![], vec!["A"], true),
+            make_profile(1, vec!["A"], vec!["B"], true),
+            make_profile(2, vec!["B"], vec![], false),
+        ];
+        let dug = DefUseGraph::from_profiles(&profiles);
+
+        let mut db = SequenceDb::new();
+        // Entry where one step failed
+        let exec_profiles = vec![
+            make_exec_profile(0, vec![], vec!["A"], true),
+            make_exec_profile(1, vec!["A"], vec!["B"], false), // failed!
+        ];
+        let seed = vec![
+            (vec![], vec![MoveValue::U64(1)]),
+            (vec![], vec![MoveValue::U64(2)]),
+        ];
+        db.add_entry(vec![0, 1], seed, &exec_profiles);
+
+        // Should not propose extensions for failing sequences
+        let extensions = db.propose_extensions(&dug, 5, 10);
+        assert!(extensions.is_empty());
+    }
+
+    #[test]
+    fn test_seq_db_no_extension_at_max_length() {
+        let profiles = vec![
+            make_profile(0, vec![], vec!["A"], true),
+            make_profile(1, vec!["A"], vec!["B"], true),
+            make_profile(2, vec!["B"], vec![], false),
+        ];
+        let dug = DefUseGraph::from_profiles(&profiles);
+
+        let mut db = SequenceDb::new();
+        let exec_profiles = vec![
+            make_exec_profile(0, vec![], vec!["A"], true),
+            make_exec_profile(1, vec!["A"], vec!["B"], true),
+        ];
+        let seed = vec![
+            (vec![], vec![MoveValue::U64(1)]),
+            (vec![], vec![MoveValue::U64(2)]),
+        ];
+        db.add_entry(vec![0, 1], seed, &exec_profiles);
+
+        // Max chain length is 2, entry has 2 steps → no extension possible
+        let extensions = db.propose_extensions(&dug, 2, 10);
+        assert!(extensions.is_empty());
+    }
+
+    #[test]
+    fn test_seq_db_no_extension_already_in_chain() {
+        // DUG: S0 writes A, S1 reads A and writes B, S1 also reads B (self-loop)
+        let profiles = vec![
+            make_profile(0, vec![], vec!["A"], true),
+            make_profile(1, vec!["A", "B"], vec!["B"], true),
+        ];
+        let dug = DefUseGraph::from_profiles(&profiles);
+
+        let mut db = SequenceDb::new();
+        let exec_profiles = vec![
+            make_exec_profile(0, vec![], vec!["A"], true),
+            make_exec_profile(1, vec!["A", "B"], vec!["B"], true),
+        ];
+        let seed = vec![
+            (vec![], vec![MoveValue::U64(1)]),
+            (vec![], vec![MoveValue::U64(2)]),
+        ];
+        db.add_entry(vec![0, 1], seed, &exec_profiles);
+
+        // S1 reads B (which is produced by the sequence), but S1 is already in the chain
+        // S0 also reads nothing of B. The only consumer of B is S1, which is in-chain.
+        let extensions = db.propose_extensions(&dug, 5, 10);
+        // S0 also reads A but is already in chain.
+        // Both consumers of produced types are already in the chain.
+        assert!(extensions.is_empty());
     }
 }
