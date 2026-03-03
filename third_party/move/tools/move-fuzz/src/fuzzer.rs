@@ -584,10 +584,42 @@ pub fn entrypoint(
                         ext_count += 1;
                     }
 
-                    if new_count + ext_count > 0 {
+                    // Sequence-level mutations from SequenceDb
+                    let mutations = seq_db.propose_mutations(d, max_chain_length, 10);
+                    let mut mut_count = 0usize;
+                    for (mut_chain, parent_seed) in mutations {
+                        if chain_fuzzers.len() >= MAX_CHAIN_FUZZERS {
+                            break;
+                        }
+                        let already_exists = existing_step_sets
+                            .iter()
+                            .any(|existing| existing.as_slice() == mut_chain.steps.as_slice())
+                            || chain_fuzzers[existing_step_sets.len()..]
+                                .iter()
+                                .any(|cf| cf.chain_steps() == mut_chain.steps.as_slice());
+                        if already_exists {
+                            continue;
+                        }
+
+                        let mut cf = ChainFuzzer::new(
+                            executor.clone(),
+                            seed_val,
+                            mut_chain,
+                            &entrypoints,
+                            type_pool.clone(),
+                            cov_trace_path.clone(),
+                            dict_string.clone(),
+                        );
+                        cf.absorb_shared_object_writes(&initial_resource_writes);
+                        cf.import_parent_seed(parent_seed);
+                        chain_fuzzers.push(cf);
+                        mut_count += 1;
+                    }
+
+                    if new_count + ext_count + mut_count > 0 {
                         info!(
-                            "spawned {} new chain fuzzers ({new_count} from DUG, {ext_count} from extensions, total: {})",
-                            new_count + ext_count,
+                            "spawned {} new chain fuzzers ({new_count} from DUG, {ext_count} from extensions, {mut_count} from mutations, total: {})",
+                            new_count + ext_count + mut_count,
                             chain_fuzzers.len()
                         );
                     }

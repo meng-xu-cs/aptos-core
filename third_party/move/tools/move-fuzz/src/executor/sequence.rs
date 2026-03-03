@@ -437,6 +437,29 @@ impl DefUseGraph {
             .filter(|&si| self.uses[si].contains(&type_node))
             .collect()
     }
+
+    /// Check whether a given step sequence has all read dependencies satisfiable.
+    ///
+    /// For each step, all types it reads must either:
+    /// 1. Be written by a preceding step in the sequence, OR
+    /// 2. Be written by the step itself (self-sufficient)
+    pub fn are_dependencies_satisfied(&self, steps: &[usize]) -> bool {
+        let mut available_types: BTreeSet<usize> = BTreeSet::new();
+        for &step in steps {
+            if step >= self.num_scripts {
+                return false;
+            }
+            for &needed_type in &self.uses[step] {
+                if !available_types.contains(&needed_type)
+                    && !self.defs[step].contains(&needed_type)
+                {
+                    return false;
+                }
+            }
+            available_types.extend(self.defs[step].iter());
+        }
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -645,6 +668,188 @@ impl SequenceDb {
     /// Whether the database is empty
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    // -----------------------------------------------------------------------
+    // Sequence-level mutation operations
+    // -----------------------------------------------------------------------
+
+    /// Propose chains by deleting a single step from coverage-producing sequences.
+    ///
+    /// For each entry with 3+ steps, tries removing each step except the last
+    /// (target). Only returns chains where remaining dependencies are still
+    /// satisfied per the DUG.
+    fn mutate_step_deletion(
+        &self,
+        dug: &DefUseGraph,
+    ) -> Vec<(Chain, Vec<(Vec<VmTypeTag>, Vec<MoveValue>)>)> {
+        let mut results = Vec::new();
+
+        for entry in &self.entries {
+            if entry.steps.len() < 3 {
+                continue;
+            }
+
+            // Try removing each step except the last (target)
+            for remove_idx in 0..entry.steps.len() - 1 {
+                let mut new_steps = entry.steps.clone();
+                new_steps.remove(remove_idx);
+
+                if dug.are_dependencies_satisfied(&new_steps) {
+                    let mut new_seed = entry.seed.clone();
+                    new_seed.remove(remove_idx);
+                    results.push((Chain { steps: new_steps }, new_seed));
+                }
+            }
+        }
+
+        results
+    }
+
+    /// Propose chains by duplicating a step immediately after itself.
+    ///
+    /// Only produces chains within the `max_chain_length` bound. Tests whether
+    /// consumers can handle repeated state transitions (e.g., double-mint).
+    fn mutate_step_duplication(
+        &self,
+        dug: &DefUseGraph,
+        max_chain_length: usize,
+    ) -> Vec<(Chain, Vec<(Vec<VmTypeTag>, Vec<MoveValue>)>)> {
+        let mut results = Vec::new();
+
+        for entry in &self.entries {
+            if entry.steps.len() >= max_chain_length {
+                continue;
+            }
+
+            for dup_idx in 0..entry.steps.len() {
+                let mut new_steps = entry.steps.clone();
+                new_steps.insert(dup_idx + 1, entry.steps[dup_idx]);
+
+                if new_steps.len() <= max_chain_length
+                    && dug.are_dependencies_satisfied(&new_steps)
+                {
+                    let mut new_seed = entry.seed.clone();
+                    new_seed.insert(dup_idx + 1, entry.seed[dup_idx].clone());
+                    results.push((Chain { steps: new_steps }, new_seed));
+                }
+            }
+        }
+
+        results
+    }
+
+    /// Propose chains by extracting contiguous sub-sequences of length >= 2.
+    ///
+    /// Only returns sub-sequences whose dependencies are self-satisfied per the DUG.
+    fn mutate_subsequence_extraction(
+        &self,
+        dug: &DefUseGraph,
+    ) -> Vec<(Chain, Vec<(Vec<VmTypeTag>, Vec<MoveValue>)>)> {
+        let mut results = Vec::new();
+
+        for entry in &self.entries {
+            if entry.steps.len() < 3 {
+                continue;
+            }
+
+            for start in 0..entry.steps.len() {
+                for end in (start + 2)..=entry.steps.len() {
+                    if end - start == entry.steps.len() {
+                        // Skip the full sequence (it's the original)
+                        continue;
+                    }
+
+                    let sub_steps: Vec<usize> = entry.steps[start..end].to_vec();
+                    if dug.are_dependencies_satisfied(&sub_steps) {
+                        let sub_seed = entry.seed[start..end].to_vec();
+                        results.push((Chain { steps: sub_steps }, sub_seed));
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
+    /// Propose chains by splicing prefix of one entry with suffix of another.
+    ///
+    /// Uses DUG dependency validation to ensure the combined chain is valid.
+    fn mutate_sequence_splicing(
+        &self,
+        dug: &DefUseGraph,
+        max_chain_length: usize,
+    ) -> Vec<(Chain, Vec<(Vec<VmTypeTag>, Vec<MoveValue>)>)> {
+        let mut results = Vec::new();
+
+        for (i, entry_a) in self.entries.iter().enumerate() {
+            for (j, entry_b) in self.entries.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+
+                for prefix_len in 1..entry_a.steps.len() {
+                    for suffix_start in 1..entry_b.steps.len() {
+                        let combined_len =
+                            prefix_len + (entry_b.steps.len() - suffix_start);
+                        if combined_len < 2 || combined_len > max_chain_length {
+                            continue;
+                        }
+
+                        let mut new_steps = entry_a.steps[..prefix_len].to_vec();
+                        new_steps.extend_from_slice(&entry_b.steps[suffix_start..]);
+
+                        if dug.are_dependencies_satisfied(&new_steps) {
+                            let mut new_seed = entry_a.seed[..prefix_len].to_vec();
+                            new_seed.extend_from_slice(&entry_b.seed[suffix_start..]);
+                            results.push((Chain { steps: new_steps }, new_seed));
+                        }
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
+    /// Propose mutated sequences from all mutation strategies.
+    ///
+    /// Combines step deletion, duplication, subsequence extraction, and splicing.
+    /// Deduplicates by step sequence and caps output at `max_mutations`.
+    pub fn propose_mutations(
+        &self,
+        dug: &DefUseGraph,
+        max_chain_length: usize,
+        max_mutations: usize,
+    ) -> Vec<(Chain, Vec<(Vec<VmTypeTag>, Vec<MoveValue>)>)> {
+        let mut all_candidates = Vec::new();
+        let mut seen_steps: BTreeSet<Vec<usize>> = BTreeSet::new();
+
+        // Collect from all mutation strategies
+        let deletions = self.mutate_step_deletion(dug);
+        let duplications = self.mutate_step_duplication(dug, max_chain_length);
+        let subsequences = self.mutate_subsequence_extraction(dug);
+        let splicings = self.mutate_sequence_splicing(dug, max_chain_length);
+
+        // Interleave strategies for variety (round-robin from each source)
+        let sources = vec![deletions, duplications, subsequences, splicings];
+        let max_len = sources.iter().map(|s| s.len()).max().unwrap_or(0);
+
+        for round in 0..max_len {
+            for source in &sources {
+                if round < source.len() {
+                    let (ref chain, ref seed) = source[round];
+                    if seen_steps.insert(chain.steps.clone()) {
+                        all_candidates.push((chain.clone(), seed.clone()));
+                        if all_candidates.len() >= max_mutations {
+                            return all_candidates;
+                        }
+                    }
+                }
+            }
+        }
+
+        all_candidates
     }
 }
 
@@ -1910,5 +2115,247 @@ mod tests {
         // S0 also reads A but is already in chain.
         // Both consumers of produced types are already in the chain.
         assert!(extensions.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests for are_dependencies_satisfied
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dug_dependencies_satisfied_linear() {
+        // S0: writes A, S1: reads A writes B, S2: reads B
+        let profiles = vec![
+            make_profile(0, vec![], vec!["A"], true),
+            make_profile(1, vec!["A"], vec!["B"], true),
+            make_profile(2, vec!["B"], vec![], false),
+        ];
+        let dug = DefUseGraph::from_profiles(&profiles);
+
+        // [0, 1, 2] is valid: A from S0, B from S1
+        assert!(dug.are_dependencies_satisfied(&[0, 1, 2]));
+        // [1, 2] invalid: S1 reads A which is not produced
+        assert!(!dug.are_dependencies_satisfied(&[1, 2]));
+        // [0, 2] invalid: S2 reads B which is not produced by S0
+        assert!(!dug.are_dependencies_satisfied(&[0, 2]));
+        // [0, 1] valid
+        assert!(dug.are_dependencies_satisfied(&[0, 1]));
+        // [0] valid (self-sufficient, no reads)
+        assert!(dug.are_dependencies_satisfied(&[0]));
+        // empty is valid
+        assert!(dug.are_dependencies_satisfied(&[]));
+        // out-of-bounds script index
+        assert!(!dug.are_dependencies_satisfied(&[99]));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests for sequence-level mutation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_seq_db_mutate_step_deletion() {
+        // S0: writes A, S1: reads A writes B, S2: reads A (not B!)
+        let profiles = vec![
+            make_profile(0, vec![], vec!["A"], true),
+            make_profile(1, vec!["A"], vec!["B"], true),
+            make_profile(2, vec!["A"], vec![], false),
+        ];
+        let dug = DefUseGraph::from_profiles(&profiles);
+
+        let mut db = SequenceDb::new();
+        let exec_profiles = vec![
+            make_exec_profile(0, vec![], vec!["A"], true),
+            make_exec_profile(1, vec!["A"], vec!["B"], true),
+            make_exec_profile(2, vec!["A"], vec![], true),
+        ];
+        let seed = vec![
+            (vec![], vec![MoveValue::U64(1)]),
+            (vec![], vec![MoveValue::U64(2)]),
+            (vec![], vec![MoveValue::U64(3)]),
+        ];
+        db.add_entry(vec![0, 1, 2], seed, &exec_profiles);
+
+        let deletions = db.mutate_step_deletion(&dug);
+        // Removing S1 (index 1) should be valid: [0, 2] works because S2 reads A (from S0)
+        assert!(deletions.iter().any(|(c, _)| c.steps == vec![0, 2]));
+        // The seed for [0, 2] should have 2 entries
+        let del_02 = deletions.iter().find(|(c, _)| c.steps == vec![0, 2]).unwrap();
+        assert_eq!(del_02.1.len(), 2);
+        // Removing S0 (index 0) should be invalid: [1, 2] has S1 reading A with no producer
+        assert!(!deletions.iter().any(|(c, _)| c.steps == vec![1, 2]));
+    }
+
+    #[test]
+    fn test_seq_db_mutate_step_duplication() {
+        // S0: writes A, S1: reads A
+        let profiles = vec![
+            make_profile(0, vec![], vec!["A"], true),
+            make_profile(1, vec!["A"], vec![], false),
+        ];
+        let dug = DefUseGraph::from_profiles(&profiles);
+
+        let mut db = SequenceDb::new();
+        let exec_profiles = vec![
+            make_exec_profile(0, vec![], vec!["A"], true),
+            make_exec_profile(1, vec!["A"], vec![], true),
+        ];
+        let seed = vec![
+            (vec![], vec![MoveValue::U64(1)]),
+            (vec![], vec![MoveValue::U64(2)]),
+        ];
+        db.add_entry(vec![0, 1], seed, &exec_profiles);
+
+        let duplications = db.mutate_step_duplication(&dug, 5);
+        // Duplicating S0 -> [0, 0, 1] should be valid
+        assert!(duplications.iter().any(|(c, _)| c.steps == vec![0, 0, 1]));
+        // Seed should have 3 entries
+        let dup = duplications
+            .iter()
+            .find(|(c, _)| c.steps == vec![0, 0, 1])
+            .unwrap();
+        assert_eq!(dup.1.len(), 3);
+
+        // Duplicating S1 -> [0, 1, 1] should also be valid (A is still available from S0)
+        assert!(duplications.iter().any(|(c, _)| c.steps == vec![0, 1, 1]));
+
+        // With max_chain_length = 2, no duplications possible
+        let no_dups = db.mutate_step_duplication(&dug, 2);
+        assert!(no_dups.is_empty());
+    }
+
+    #[test]
+    fn test_seq_db_mutate_subsequence_extraction() {
+        // S0: writes A, S1: reads A writes B, S2: reads B writes C, S3: reads C
+        let profiles = vec![
+            make_profile(0, vec![], vec!["A"], true),
+            make_profile(1, vec!["A"], vec!["B"], true),
+            make_profile(2, vec!["B"], vec!["C"], true),
+            make_profile(3, vec!["C"], vec![], false),
+        ];
+        let dug = DefUseGraph::from_profiles(&profiles);
+
+        let mut db = SequenceDb::new();
+        let exec_profiles = vec![
+            make_exec_profile(0, vec![], vec!["A"], true),
+            make_exec_profile(1, vec!["A"], vec!["B"], true),
+            make_exec_profile(2, vec!["B"], vec!["C"], true),
+            make_exec_profile(3, vec!["C"], vec![], true),
+        ];
+        let seed = vec![
+            (vec![], vec![MoveValue::U64(1)]),
+            (vec![], vec![MoveValue::U64(2)]),
+            (vec![], vec![MoveValue::U64(3)]),
+            (vec![], vec![MoveValue::U64(4)]),
+        ];
+        db.add_entry(vec![0, 1, 2, 3], seed, &exec_profiles);
+
+        let subsequences = db.mutate_subsequence_extraction(&dug);
+        // [0, 1] should be valid (S0 writes A, S1 reads A)
+        assert!(subsequences.iter().any(|(c, _)| c.steps == vec![0, 1]));
+        // [1, 2] should be invalid (S1 reads A, which is not in the subsequence)
+        assert!(!subsequences.iter().any(|(c, _)| c.steps == vec![1, 2]));
+        // [0, 1, 2] should be valid
+        assert!(subsequences.iter().any(|(c, _)| c.steps == vec![0, 1, 2]));
+        // [0, 1, 2] seed should have 3 entries
+        let sub = subsequences
+            .iter()
+            .find(|(c, _)| c.steps == vec![0, 1, 2])
+            .unwrap();
+        assert_eq!(sub.1.len(), 3);
+    }
+
+    #[test]
+    fn test_seq_db_mutate_sequence_splicing() {
+        // S0: writes A, S1: reads A writes B, S2: reads A writes C, S3: reads C
+        let profiles = vec![
+            make_profile(0, vec![], vec!["A"], true),
+            make_profile(1, vec!["A"], vec!["B"], true),
+            make_profile(2, vec!["A"], vec!["C"], true),
+            make_profile(3, vec!["C"], vec![], false),
+        ];
+        let dug = DefUseGraph::from_profiles(&profiles);
+
+        let mut db = SequenceDb::new();
+        // Entry 1: [0, 1]
+        let ep1 = vec![
+            make_exec_profile(0, vec![], vec!["A"], true),
+            make_exec_profile(1, vec!["A"], vec!["B"], true),
+        ];
+        let seed1 = vec![
+            (vec![], vec![MoveValue::U64(10)]),
+            (vec![], vec![MoveValue::U64(20)]),
+        ];
+        db.add_entry(vec![0, 1], seed1, &ep1);
+
+        // Entry 2: [0, 2, 3]
+        let ep2 = vec![
+            make_exec_profile(0, vec![], vec!["A"], true),
+            make_exec_profile(2, vec!["A"], vec!["C"], true),
+            make_exec_profile(3, vec!["C"], vec![], true),
+        ];
+        let seed2 = vec![
+            (vec![], vec![MoveValue::U64(30)]),
+            (vec![], vec![MoveValue::U64(40)]),
+            (vec![], vec![MoveValue::U64(50)]),
+        ];
+        db.add_entry(vec![0, 2, 3], seed2, &ep2);
+
+        let splicings = db.mutate_sequence_splicing(&dug, 5);
+        // [0, 2, 3] = prefix [0] from entry1 + suffix [2, 3] from entry2
+        // S0 writes A, S2 reads A (ok), S2 writes C, S3 reads C (ok). Valid!
+        assert!(splicings.iter().any(|(c, _)| c.steps == vec![0, 2, 3]));
+
+        // Verify the seed is correctly spliced: entry1.seed[0] + entry2.seed[1..3]
+        let splice = splicings
+            .iter()
+            .find(|(c, _)| c.steps == vec![0, 2, 3])
+            .unwrap();
+        assert_eq!(splice.1.len(), 3);
+        // First seed element from entry1 (value 10)
+        assert_eq!(splice.1[0].1[0], MoveValue::U64(10));
+        // Second seed element from entry2 index 1 (value 40)
+        assert_eq!(splice.1[1].1[0], MoveValue::U64(40));
+    }
+
+    #[test]
+    fn test_seq_db_propose_mutations_dedup_and_cap() {
+        // S0: writes A, S1: reads A writes B, S2: reads B
+        let profiles = vec![
+            make_profile(0, vec![], vec!["A"], true),
+            make_profile(1, vec!["A"], vec!["B"], true),
+            make_profile(2, vec!["B"], vec![], false),
+        ];
+        let dug = DefUseGraph::from_profiles(&profiles);
+
+        let mut db = SequenceDb::new();
+        let exec_profiles = vec![
+            make_exec_profile(0, vec![], vec!["A"], true),
+            make_exec_profile(1, vec!["A"], vec!["B"], true),
+            make_exec_profile(2, vec!["B"], vec![], true),
+        ];
+        let seed = vec![
+            (vec![], vec![MoveValue::U64(1)]),
+            (vec![], vec![MoveValue::U64(2)]),
+            (vec![], vec![MoveValue::U64(3)]),
+        ];
+        db.add_entry(vec![0, 1, 2], seed, &exec_profiles);
+
+        // Request at most 3 mutations
+        let mutations = db.propose_mutations(&dug, 5, 3);
+        assert!(mutations.len() <= 3);
+
+        // All returned chains should have unique step sequences
+        let step_sets: BTreeSet<Vec<usize>> =
+            mutations.iter().map(|(c, _)| c.steps.clone()).collect();
+        assert_eq!(step_sets.len(), mutations.len());
+    }
+
+    #[test]
+    fn test_seq_db_propose_mutations_empty() {
+        let profiles = vec![make_profile(0, vec![], vec!["A"], true)];
+        let dug = DefUseGraph::from_profiles(&profiles);
+        let db = SequenceDb::new();
+
+        let mutations = db.propose_mutations(&dug, 5, 10);
+        assert!(mutations.is_empty());
     }
 }
