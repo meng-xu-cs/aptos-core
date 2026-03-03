@@ -4,11 +4,12 @@
 use crate::{
     executor::{
         oneshot::ExecStatus,
-        tracing::{ResourceWrite, TracingExecutor},
+        tracing::{ResourceRead, ResourceWrite, TracingExecutor},
     },
     mutate::mutator::{Mutator, TypePool},
     prep::canvas::{BasicInput, ScriptSignature},
 };
+use aptos_types::account_address::AccountAddress;
 use anyhow::Result;
 use aptos_types::transaction::{
     ExecutionStatus, Script, TransactionArgument, TransactionPayload, TransactionStatus,
@@ -50,6 +51,55 @@ pub struct ScriptProfile {
     pub reads: BTreeSet<ResourceTag>,
     pub writes: BTreeSet<ResourceTag>,
     pub ever_succeeded: bool,
+}
+
+/// Resource profile from a single execution that found new coverage.
+/// Used to feed per-seed observations back into the DUG.
+pub struct ExecResourceProfile {
+    pub script_index: usize,
+    pub reads: BTreeSet<ResourceTag>,
+    pub writes: BTreeSet<ResourceTag>,
+    pub succeeded: bool,
+}
+
+impl ExecResourceProfile {
+    /// Build from raw execution outputs, applying framework address filtering.
+    ///
+    /// Reads are always recorded (filtering out framework address 0x1).
+    /// Writes are only recorded when `succeeded` is true.
+    /// This matches the convention in `discover_profiles()`.
+    pub fn from_execution(
+        script_index: usize,
+        resource_writes: &[ResourceWrite],
+        resource_reads: &[ResourceRead],
+        succeeded: bool,
+    ) -> Self {
+        let mut reads = BTreeSet::new();
+        for read in resource_reads {
+            if read.address == AccountAddress::ONE {
+                continue;
+            }
+            reads.insert(ResourceTag {
+                struct_tag: read.struct_tag.clone(),
+            });
+        }
+
+        let mut writes = BTreeSet::new();
+        if succeeded {
+            for write in resource_writes {
+                writes.insert(ResourceTag {
+                    struct_tag: write.struct_tag.clone(),
+                });
+            }
+        }
+
+        Self {
+            script_index,
+            reads,
+            writes,
+            succeeded,
+        }
+    }
 }
 
 /// Discover resource access profiles for each script by running them
@@ -167,8 +217,6 @@ pub struct DefUseGraph {
     type_nodes: Vec<ResourceTag>,
 
     /// ResourceTag → type node index (for fast lookup)
-    /// Used in `from_profiles()` construction and test assertions.
-    #[allow(dead_code)]
     type_index: BTreeMap<ResourceTag, usize>,
 
     /// script_index → set of type node indices this script writes
@@ -183,6 +231,9 @@ pub struct DefUseGraph {
 
     /// Which scripts ever succeeded during discovery
     ever_succeeded: BTreeSet<usize>,
+
+    /// Monotonic modification counter for change detection
+    modification_count: usize,
 }
 
 impl DefUseGraph {
@@ -243,6 +294,7 @@ impl DefUseGraph {
             uses,
             producers,
             ever_succeeded,
+            modification_count: 0,
         }
     }
 
@@ -289,6 +341,85 @@ impl DefUseGraph {
     #[cfg(test)]
     pub fn type_tag(&self, type_node: usize) -> &ResourceTag {
         &self.type_nodes[type_node]
+    }
+
+    // -----------------------------------------------------------------------
+    // Mutation methods (for dynamic DUG updates)
+    // -----------------------------------------------------------------------
+
+    /// Intern a ResourceTag, returning its type node index.
+    /// Creates a new type node if the tag hasn't been seen before.
+    fn intern_type(&mut self, tag: &ResourceTag) -> usize {
+        if let Some(&idx) = self.type_index.get(tag) {
+            idx
+        } else {
+            let idx = self.type_nodes.len();
+            self.type_nodes.push(tag.clone());
+            self.type_index.insert(tag.clone(), idx);
+            idx
+        }
+    }
+
+    /// Add a def edge: script `script_index` writes `tag`.
+    /// Returns true if the edge was new (DUG changed).
+    pub fn add_def(&mut self, script_index: usize, tag: &ResourceTag) -> bool {
+        assert!(script_index < self.num_scripts);
+        let ti = self.intern_type(tag);
+        let inserted = self.defs[script_index].insert(ti);
+        if inserted {
+            self.producers.entry(ti).or_default().insert(script_index);
+            self.modification_count += 1;
+        }
+        inserted
+    }
+
+    /// Add a use edge: script `script_index` reads `tag`.
+    /// Returns true if the edge was new (DUG changed).
+    pub fn add_use(&mut self, script_index: usize, tag: &ResourceTag) -> bool {
+        assert!(script_index < self.num_scripts);
+        let ti = self.intern_type(tag);
+        let inserted = self.uses[script_index].insert(ti);
+        if inserted {
+            self.modification_count += 1;
+        }
+        inserted
+    }
+
+    /// Mark a script as having succeeded at least once.
+    /// Returns true if this is the first time the script succeeded.
+    pub fn mark_succeeded(&mut self, script_index: usize) -> bool {
+        assert!(script_index < self.num_scripts);
+        let inserted = self.ever_succeeded.insert(script_index);
+        if inserted {
+            self.modification_count += 1;
+        }
+        inserted
+    }
+
+    /// Ingest an ExecResourceProfile into the DUG.
+    /// Adds use edges for all reads, and def edges + mark_succeeded for
+    /// successful writes.
+    pub fn ingest_profile(&mut self, profile: &ExecResourceProfile) {
+        for tag in &profile.reads {
+            self.add_use(profile.script_index, tag);
+        }
+        if profile.succeeded {
+            self.mark_succeeded(profile.script_index);
+            for tag in &profile.writes {
+                self.add_def(profile.script_index, tag);
+            }
+        }
+    }
+
+    /// Check if the DUG has been modified since a given marker value.
+    /// Pass the return value of `modification_marker()` at a previous point.
+    pub fn has_changed_since(&self, marker: usize) -> bool {
+        self.modification_count > marker
+    }
+
+    /// Get the current modification marker (for use with `has_changed_since()`).
+    pub fn modification_marker(&self) -> usize {
+        self.modification_count
     }
 }
 
@@ -631,12 +762,26 @@ impl ChainFuzzer {
         self.chain.len()
     }
 
+    /// Get the chain's steps (for deduplication when reconstructing chains)
+    pub fn chain_steps(&self) -> &[usize] {
+        &self.chain.steps
+    }
+
     /// Execute one chain iteration.
     ///
-    /// Returns `(exec_status, corpus_size, found_new_coverage, resource_writes)`.
+    /// Returns `(exec_status, corpus_size, found_new_coverage, resource_writes, profiles)`.
     /// - `exec_status` is the status of the last step that executed (or the first failure)
     /// - Resource writes are accumulated from all successful steps
-    pub fn run_one(&mut self) -> Result<(ExecStatus, usize, bool, Vec<ResourceWrite>)> {
+    /// - `profiles` contains per-step resource profiles when new coverage was found
+    pub fn run_one(
+        &mut self,
+    ) -> Result<(
+        ExecStatus,
+        usize,
+        bool,
+        Vec<ResourceWrite>,
+        Vec<ExecResourceProfile>,
+    )> {
         // Use the same signer for all steps in the chain
         let sender = self.mutators[0].random_signer();
         let num_steps = self.chain.len();
@@ -685,9 +830,11 @@ impl ChainFuzzer {
         // Clear trace buffer ONCE at start of entire chain
         clear_tracing_buffer();
 
-        // Execute chain steps sequentially
+        // Execute chain steps sequentially, collecting per-step resource data
         let mut all_writes = vec![];
         let mut last_status = ExecStatus::Success;
+        let mut step_raw_profiles: Vec<(usize, Vec<ResourceWrite>, Vec<ResourceRead>, bool)> =
+            Vec::with_capacity(num_steps);
 
         for (step_idx, (ty_args, args)) in step_inputs.iter().enumerate() {
             let payload = TransactionPayload::Script(Script::new(
@@ -702,8 +849,9 @@ impl ChainFuzzer {
                     .collect(),
             ));
 
-            let (vm_status, txn_status, writes) =
-                self.executor.run_payload_with_sender(sender, payload)?;
+            let (vm_status, txn_status, writes, reads) =
+                self.executor
+                    .run_payload_with_sender_tracking(sender, payload)?;
 
             // Update object dictionaries in ALL mutators with writes from this step
             for mutator in self.mutators.iter_mut() {
@@ -711,18 +859,33 @@ impl ChainFuzzer {
             }
 
             let step_status: ExecStatus = (vm_status, txn_status).into();
+            let succeeded = matches!(step_status, ExecStatus::Success);
 
-            if matches!(step_status, ExecStatus::Success) {
+            // Collect raw profile data for this step (clone writes before moving)
+            step_raw_profiles.push((
+                self.chain.steps[step_idx],
+                writes.clone(),
+                reads,
+                succeeded,
+            ));
+
+            if succeeded {
                 all_writes.extend(writes);
             }
 
             // If a step fails, abort the chain early (predecessor setup failed)
-            if !matches!(step_status, ExecStatus::Success) {
+            if !succeeded {
                 last_status = step_status;
                 self.exec_count += 1;
                 // Flush and discard trace data
                 flush_tracing_buffer();
-                return Ok((last_status, self.seedpool.len(), false, all_writes));
+                return Ok((
+                    last_status,
+                    self.seedpool.len(),
+                    false,
+                    all_writes,
+                    vec![],
+                ));
             }
         }
 
@@ -732,12 +895,26 @@ impl ChainFuzzer {
         self.exec_count += 1;
         let coverage_map = CoverageMap::from_trace_file(&self.trace_path)?;
         let found_new = self.update_coverage(coverage_map);
-        if found_new {
+        let profiles = if found_new {
             self.last_new_coverage_time = Some(Instant::now());
             self.seedpool.push(step_inputs);
-        }
+            step_raw_profiles
+                .iter()
+                .map(|(script_index, writes, reads, succeeded)| {
+                    ExecResourceProfile::from_execution(*script_index, writes, reads, *succeeded)
+                })
+                .collect()
+        } else {
+            vec![]
+        };
 
-        Ok((last_status, self.seedpool.len(), found_new, all_writes))
+        Ok((
+            last_status,
+            self.seedpool.len(),
+            found_new,
+            all_writes,
+            profiles,
+        ))
     }
 
     /// Absorb shared object discoveries from other fuzzers
@@ -1034,5 +1211,156 @@ mod tests {
         // Chain should have one of S0 or S1 as producer (either is fine)
         assert!(chain.steps.contains(&0) || chain.steps.contains(&1));
         assert_eq!(chain.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // DUG mutation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dug_add_def_basic() {
+        let profiles = vec![
+            make_profile(0, vec![], vec!["A"], true),
+            make_profile(1, vec!["A"], vec![], false),
+        ];
+        let mut dug = DefUseGraph::from_profiles(&profiles);
+        assert_eq!(dug.num_types(), 1); // only A
+
+        // Add a new def: S1 writes B (new type)
+        let tag_b = make_tag("B");
+        let changed = dug.add_def(1, &tag_b);
+        assert!(changed);
+        assert_eq!(dug.num_types(), 2); // A and B
+        assert_eq!(dug.defs_of(1).len(), 1);
+        let ti_b = *dug.type_index.get(&tag_b).unwrap();
+        assert!(dug.producers_of(ti_b).contains(&1));
+    }
+
+    #[test]
+    fn test_dug_add_def_idempotent() {
+        let profiles = vec![make_profile(0, vec![], vec!["A"], true)];
+        let mut dug = DefUseGraph::from_profiles(&profiles);
+        let marker = dug.modification_marker();
+
+        // Adding the same def again should not change the DUG
+        let tag_a = make_tag("A");
+        let changed = dug.add_def(0, &tag_a);
+        assert!(!changed);
+        assert!(!dug.has_changed_since(marker));
+    }
+
+    #[test]
+    fn test_dug_add_use_basic() {
+        let profiles = vec![
+            make_profile(0, vec![], vec!["A"], true),
+            make_profile(1, vec![], vec![], true),
+        ];
+        let mut dug = DefUseGraph::from_profiles(&profiles);
+        assert!(dug.uses_of(1).is_empty());
+
+        // S1 now reads A
+        let tag_a = make_tag("A");
+        let changed = dug.add_use(1, &tag_a);
+        assert!(changed);
+        assert_eq!(dug.uses_of(1).len(), 1);
+    }
+
+    #[test]
+    fn test_dug_add_use_new_type() {
+        let profiles = vec![make_profile(0, vec![], vec![], false)];
+        let mut dug = DefUseGraph::from_profiles(&profiles);
+        assert_eq!(dug.num_types(), 0);
+
+        // S0 reads X (type X does not exist yet)
+        let tag_x = make_tag("X");
+        let changed = dug.add_use(0, &tag_x);
+        assert!(changed);
+        assert_eq!(dug.num_types(), 1);
+        assert_eq!(dug.uses_of(0).len(), 1);
+    }
+
+    #[test]
+    fn test_dug_mark_succeeded() {
+        let profiles = vec![make_profile(0, vec!["A"], vec![], false)];
+        let mut dug = DefUseGraph::from_profiles(&profiles);
+        assert!(!dug.script_ever_succeeded(0));
+
+        let changed = dug.mark_succeeded(0);
+        assert!(changed);
+        assert!(dug.script_ever_succeeded(0));
+
+        // Idempotent
+        let changed2 = dug.mark_succeeded(0);
+        assert!(!changed2);
+    }
+
+    #[test]
+    fn test_dug_modification_tracking() {
+        let profiles = vec![
+            make_profile(0, vec![], vec!["A"], true),
+            make_profile(1, vec!["A"], vec![], false),
+        ];
+        let mut dug = DefUseGraph::from_profiles(&profiles);
+        let m0 = dug.modification_marker();
+
+        // No change yet
+        assert!(!dug.has_changed_since(m0));
+
+        // Add a new def
+        dug.add_def(1, &make_tag("B"));
+        assert!(dug.has_changed_since(m0));
+        let m1 = dug.modification_marker();
+        assert!(!dug.has_changed_since(m1));
+    }
+
+    #[test]
+    fn test_dug_ingest_profile() {
+        let profiles = vec![
+            make_profile(0, vec![], vec!["A"], true),
+            make_profile(1, vec![], vec![], false),
+        ];
+        let mut dug = DefUseGraph::from_profiles(&profiles);
+        let m0 = dug.modification_marker();
+
+        // Ingest a profile where S1 reads A and writes B, and succeeded
+        let profile = ExecResourceProfile {
+            script_index: 1,
+            reads: vec![make_tag("A")].into_iter().collect(),
+            writes: vec![make_tag("B")].into_iter().collect(),
+            succeeded: true,
+        };
+        dug.ingest_profile(&profile);
+
+        assert!(dug.has_changed_since(m0));
+        assert!(dug.script_ever_succeeded(1));
+        assert_eq!(dug.uses_of(1).len(), 1); // reads A
+        assert_eq!(dug.defs_of(1).len(), 1); // writes B
+        assert_eq!(dug.num_types(), 2); // A and B
+    }
+
+    #[test]
+    fn test_dug_chain_reconstruction_after_mutation() {
+        // Initially: S0 writes A, S1 reads nothing (no chain possible to S1)
+        let profiles = vec![
+            make_profile(0, vec![], vec!["A"], true),
+            make_profile(1, vec![], vec![], false),
+        ];
+        let mut dug = DefUseGraph::from_profiles(&profiles);
+        let mut rng = StdRng::seed_from_u64(42);
+
+        let chains_before = construct_chains(&dug, 5, 2, 10, &mut rng);
+        // S1 has no unmet deps, so no chains to it
+        assert!(chains_before.iter().all(|c| c.target() != 1));
+
+        // Now S1 reads A — this creates an unmet dependency that S0 can resolve
+        dug.add_use(1, &make_tag("A"));
+
+        let mut rng2 = StdRng::seed_from_u64(42);
+        let chains_after = construct_chains(&dug, 5, 2, 10, &mut rng2);
+        // Now there should be a chain [S0, S1]
+        let chain_to_1 = chains_after.iter().find(|c| c.target() == 1);
+        assert!(chain_to_1.is_some());
+        let chain = chain_to_1.unwrap();
+        assert!(chain.steps.contains(&0));
     }
 }

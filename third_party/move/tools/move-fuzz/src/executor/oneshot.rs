@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    executor::tracing::{ResourceWrite, TracingExecutor},
+    executor::{
+        sequence::ExecResourceProfile,
+        tracing::{ResourceWrite, TracingExecutor},
+    },
     mutate::mutator::{Mutator, TypePool},
     prep::canvas::{BasicInput, ScriptSignature},
 };
@@ -202,6 +205,7 @@ impl Display for ExecStatus {
 
 /// A one-shot fuzzer
 pub struct OneshotFuzzer {
+    script_index: usize,
     script_sig: ScriptSignature,
     script_code: Vec<u8>,
     executor: TracingExecutor,
@@ -221,6 +225,7 @@ impl OneshotFuzzer {
     pub fn new(
         executor: TracingExecutor,
         seed: u64,
+        script_index: usize,
         script_sig: ScriptSignature,
         script_code: Vec<u8>,
         type_pool: TypePool,
@@ -236,6 +241,7 @@ impl OneshotFuzzer {
                 dict_string,
             ),
             executor,
+            script_index,
             script_sig,
             script_code,
             trace_path,
@@ -294,9 +300,13 @@ impl OneshotFuzzer {
         )
     }
 
-    /// Execute one entry-point. Returns (status, corpus_size, found_new_coverage, resource_writes).
+    /// Execute one entry-point.
+    /// Returns (status, corpus_size, found_new_coverage, resource_writes, profile).
     /// Resource writes are only returned for successful transactions.
-    pub fn run_one(&mut self) -> Result<(ExecStatus, usize, bool, Vec<ResourceWrite>)> {
+    /// The profile is `Some` only when new coverage was found (a seed was added).
+    pub fn run_one(
+        &mut self,
+    ) -> Result<(ExecStatus, usize, bool, Vec<ResourceWrite>, Option<ExecResourceProfile>)> {
         // prepare
         let sender = self.mutator.random_signer();
 
@@ -359,9 +369,10 @@ impl OneshotFuzzer {
         // prologue: reset the VM's trace buffer (truncates and reopens the file)
         clear_tracing_buffer();
 
-        // execute
-        let (vm_status, txn_status, resource_writes) =
-            self.executor.run_payload_with_sender(sender, payload)?;
+        // execute with tracking to capture resource reads
+        let (vm_status, txn_status, resource_writes, resource_reads) =
+            self.executor
+                .run_payload_with_sender_tracking(sender, payload)?;
 
         // update object dictionary from write set
         self.mutator.update_object_dict(&resource_writes);
@@ -371,15 +382,23 @@ impl OneshotFuzzer {
 
         // update coverage and seed pool
         self.exec_count += 1;
+        let exec_status: ExecStatus = (vm_status, txn_status).into();
         let coverage_map = CoverageMap::from_trace_file(&self.trace_path)?;
         let found_new = self.update_coverage(coverage_map);
-        if found_new {
+        let profile = if found_new {
             self.last_new_coverage_time = Some(Instant::now());
             self.seedpool.push((ty_args, args));
-        }
+            Some(ExecResourceProfile::from_execution(
+                self.script_index,
+                &resource_writes,
+                &resource_reads,
+                matches!(exec_status, ExecStatus::Success),
+            ))
+        } else {
+            None
+        };
 
         // only share resource writes from successful transactions
-        let exec_status = (vm_status, txn_status).into();
         let shared_writes = if matches!(exec_status, ExecStatus::Success) {
             resource_writes
         } else {
@@ -387,7 +406,13 @@ impl OneshotFuzzer {
         };
 
         // return status
-        Ok((exec_status, self.seedpool.len(), found_new, shared_writes))
+        Ok((
+            exec_status,
+            self.seedpool.len(),
+            found_new,
+            shared_writes,
+            profile,
+        ))
     }
 
     /// Absorb shared object discoveries from other fuzzers

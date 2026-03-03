@@ -145,10 +145,11 @@ pub fn entrypoint(
 
     let mut oneshot_fuzzers = vec![];
     // prepare one fuzzer for each script
-    for (sig, code) in &entrypoints {
+    for (idx, (sig, code)) in entrypoints.iter().enumerate() {
         let mut instance = OneshotFuzzer::new(
             executor.clone(),
             seed.unwrap_or(0),
+            idx,
             sig.clone(),
             code.clone(),
             type_pool.clone(),
@@ -180,7 +181,7 @@ pub fn entrypoint(
     );
 
     // build the Def-Use Graph from discovery profiles
-    let dug = DefUseGraph::from_profiles(&profiles);
+    let mut dug = DefUseGraph::from_profiles(&profiles);
     info!(
         "DUG: {} type nodes, {} scripts",
         dug.num_types(),
@@ -216,6 +217,10 @@ pub fn entrypoint(
         })
         .collect();
     info!("created {} chain fuzzers", chain_fuzzers.len());
+
+    // DUG modification tracking for periodic chain reconstruction
+    let mut dug_last_marker = dug.modification_marker();
+    let mut last_chain_reconstruction = Instant::now();
 
     // clear trace data from discovery phase
     clear_tracing_buffer();
@@ -254,12 +259,17 @@ pub fn entrypoint(
 
         // run oneshot fuzzers
         for (idx, fuzzer) in oneshot_fuzzers.iter_mut().enumerate() {
-            let (status, corpus_size, found_new, writes) = fuzzer.run_one()?;
+            let (status, corpus_size, found_new, writes, profile) = fuzzer.run_one()?;
             round_writes.extend(writes);
             // update statistics
             *category_counts.entry(status.category()).or_insert(0) += 1;
             *stats.entry(status.to_string()).or_insert(0) += 1;
             total_execs += 1;
+
+            // feed per-seed profile into the DUG
+            if let Some(ref p) = profile {
+                dug.ingest_profile(p);
+            }
 
             // log new error codes as they are discovered
             if !matches!(status, ExecStatus::Success) && !seen_exec_stats.contains(&status) {
@@ -278,11 +288,16 @@ pub fn entrypoint(
 
         // run chain fuzzers
         for (idx, fuzzer) in chain_fuzzers.iter_mut().enumerate() {
-            let (status, corpus_size, found_new, writes) = fuzzer.run_one()?;
+            let (status, corpus_size, found_new, writes, profiles) = fuzzer.run_one()?;
             round_writes.extend(writes);
             *category_counts.entry(status.category()).or_insert(0) += 1;
             *stats.entry(status.to_string()).or_insert(0) += 1;
             total_execs += 1;
+
+            // feed per-step profiles into the DUG
+            for p in &profiles {
+                dug.ingest_profile(p);
+            }
 
             if !matches!(status, ExecStatus::Success) && !seen_exec_stats.contains(&status) {
                 let desc = fuzzer.script_short_desc();
@@ -443,6 +458,67 @@ pub fn entrypoint(
 
             last_report_coverage = total_coverage;
             last_report = Instant::now();
+
+            // Dynamic chain reconstruction (every 60 seconds if DUG changed)
+            if last_chain_reconstruction.elapsed().as_secs() >= 60
+                && dug.has_changed_since(dug_last_marker)
+            {
+                dug_last_marker = dug.modification_marker();
+                info!(
+                    "DUG updated: {} type nodes, reconstructing chains",
+                    dug.num_types()
+                );
+
+                let new_chains = sequence::construct_chains(
+                    &dug,
+                    max_chain_length,
+                    max_chain_repetition,
+                    MAX_CHAIN_FUZZERS,
+                    &mut chain_rng,
+                );
+
+                // Deduplicate: only add chains whose steps differ from all existing chain fuzzers
+                // Collect owned copies to avoid borrowing chain_fuzzers immutably while pushing
+                let existing_step_sets: Vec<Vec<usize>> = chain_fuzzers
+                    .iter()
+                    .map(|cf| cf.chain_steps().to_vec())
+                    .collect();
+
+                let mut new_count = 0usize;
+                for chain in new_chains {
+                    if chain_fuzzers.len() >= MAX_CHAIN_FUZZERS {
+                        break;
+                    }
+                    let already_exists = existing_step_sets
+                        .iter()
+                        .any(|existing| existing.as_slice() == chain.steps.as_slice());
+                    if already_exists {
+                        continue;
+                    }
+
+                    let mut cf = ChainFuzzer::new(
+                        executor.clone(),
+                        seed_val,
+                        chain,
+                        &entrypoints,
+                        type_pool.clone(),
+                        cov_trace_path.clone(),
+                        dict_string.clone(),
+                    );
+                    cf.absorb_shared_object_writes(&initial_resource_writes);
+                    chain_fuzzers.push(cf);
+                    new_count += 1;
+                }
+
+                if new_count > 0 {
+                    info!(
+                        "spawned {new_count} new chain fuzzers (total: {})",
+                        chain_fuzzers.len()
+                    );
+                }
+
+                last_chain_reconstruction = Instant::now();
+            }
         }
     }
 }
